@@ -14,11 +14,15 @@
   .card h3 a { color: #1a56db; text-decoration: none; }
   .card h3 a:hover { text-decoration: underline; }
   .orig { font-size: 12px; color: #999; margin-bottom: 8px; }
-  .card p { font-size: 14px; line-height: 1.7; margin: 0 0 10px; color: #444; }
+  .card p, .card li { font-size: 14px; line-height: 1.7; color: #444; }
+  .card p { margin: 0 0 8px; }
+  .card ul { margin: 6px 0 10px; padding-left: 20px; }
+  .card code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
   .meta { font-size: 12px; color: #999; display: flex; gap: 12px; flex-wrap: wrap; }
   .tag { background: #eef4ff; color: #1a56db; border-radius: 4px; padding: 2px 8px; }
   .insight { background: #fffbe6; border: 1px solid #f0e6b8; border-radius: 10px; padding: 14px 18px; font-size: 14px; line-height: 1.7; }
   .insight b { color: #8a6d00; }
+  .note { font-size: 12px; color: #999; margin-top: 24px; }
 </style>
 </head>
 <body>
@@ -28,29 +32,52 @@
 <h2>并行策略（训练）</h2>
 <div class="card">
   <h3><a href="https://mlsysbook.ai/vol2/distributed_training/distributed_training.html">机器学习系统（规模化）：分布式训练</a></h3>
-  <div class="orig">原文：Machine Learning Systems at Scale — Distributed Training（MLSys Book Vol.2）</div>
-  <p>从第一性原理讲分布式训练：fleet law、通信-计算比、3D 并行立方体 (d,p,t)、DP / TP / PP 各自的通信代价与硬件带宽匹配原则、ZeRO 内存分片、pipeline bubble 与 microbatch 调度、混合并行选型决策树。适合当作并行策略的系统性教材精读。</p>
-  <div class="meta"><span class="tag">并行策略（训练）</span><span>收藏于 2026-09-30</span></div>
+  <div class="orig">原文：Machine Learning Systems at Scale — Distributed Training（MLSys Book Vol.2）｜ 中文精读已完成</div>
+  <p><b>核心思想：</b>分布式训练是约束满足问题，不是硬件乘法。单步时间 <code>T_step(N) = T_compute/N + T_comm(N) + T_sync(N) − T_overlap</code>，通信-计算比 ρ 决定集群是超算还是一堆闲置电暖器。DP = 并行 for 循环（按 batch 展开），TP = 向量化/SIMD（按矩阵乘内层展开，NVLink 当向量寄存器），PP = 指令流水线（按 layer 分段）。</p>
+  <ul>
+    <li><b>DP：</b>每卡完整模型副本 + 数据分片，AllReduce 同步梯度。纯 DP 在 1024 卡上效率只有约 37.5%。三堵墙：显存墙、带宽墙、batch 陷阱（critical batch size）。</li>
+    <li><b>ZeRO / FSDP：</b>分片式 DP。ZeRO-1 切优化器状态，ZeRO-2 加切梯度（ReduceScatter 代替 AllReduce），ZeRO-3/FSDP 再切参数（每层前向 AllGather 即时重建）。7B 模型 64 卡可把每卡状态从 112GB 压到 1.75GB，代价是 10–25% 通信开销。注意：ZeRO 切不动 activation，长上下文还得靠模型并行。</li>
+    <li><b>PP：</b>按层切 stage，stage 间只传 activation（B_μ×S×d_model×2 字节），可走 InfiniBand 跨节点。bubble = (p−1)/(m+p−1)，p=8/m=32 时约 18%。调度演进：GPipe → 1F1B（activation 峰值从 O(m×p) 降到 O(p)，才能堆 m≫p 压 bubble）→ zero-bubble（拆 B/W 核填空闲）。</li>
+    <li><b>TP：</b>Megatron 列并行+行并行配对，每 block 只需 2 次 AllReduce。只能待在 NVLink 节点内（跨节点 MFU 跌到个位数），一般不超过 8 路。</li>
+    <li><b>CP（训练侧）：</b>Ring Attention 沿序列切分，K/V 块在环上轮转，N 卡把上下文放大 N 倍——和推理 decode CP 同一思想。</li>
+    <li><b>EP（MoE）：</b>All-to-All dispatch/combine 路由 token；capacity factor（1.25–1.5）+ auxiliary load balancing loss 对付路由偏斜。</li>
+    <li><b>混合 3D：</b>N = d×p×t。TP-8（NVLink 节点内）+ PP-4（邻近节点）+ DP-32（全集群），DP 只同步 1/32 参数分片——这就是 TorchTitan 的 FSDP+TP+PP+CP 4D 并行的理论底座。选型原则叫 hierarchy-aware parallelism：把通信画到带宽地形上，高频小消息走 NVLink，量大低频的走全集群。</li>
+  </ul>
+  <div class="meta"><span class="tag">并行策略（训练）</span><span>收藏于 2026-09-30</span><span>中文精读：goal/files/分布式训练-MLSysBook-中文精读.md</span></div>
 </div>
 
 <h2>并行策略（推理）</h2>
 <div class="card">
   <h3><a href="https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/#decode-context-parallel">vLLM 上下文并行部署</a></h3>
-  <div class="orig">原文：Context Parallel Deployment — vLLM（官方文档）</div>
-  <p>prefill 和 decode 分开设计上下文并行：prefill CP 把长请求的 QKV 按 chunk 分到多卡并行计算，控制首 token 延迟（TTFT）；decode CP 的核心是沿序列维度切分 KV cache，解决张量并行带来的 KV cache 复制问题——比如 DeepSeek-R1 开 <code>-tp 8</code> 会有 8 倍 KV cache 复制，加上 <code>-dcp 8</code> 即可消除。支持 MLA / GQA 模型，可与多 token 预测（MTP）组合。与训练侧的 CP 原理相通（都是沿 sequence 切分），但优化目标不同：训练要吞吐和显存，推理要延迟和 KV cache 利用率。</p>
-  <div class="meta"><span class="tag">并行策略（推理）</span><span>收藏于 2026-09-30</span></div>
+  <div class="orig">原文：Context Parallel Deployment — vLLM（官方文档）｜ 中文精读已完成</div>
+  <ul>
+    <li><b>Prefill CP：</b>长请求切 N 个 chunk，每卡算一个 chunk 的 Q/K/V。两种模式：部分 query + 全量 K/V（加速 prefill，控 TTFT）；部分 query + 部分 K/V（放不下全量 K/V 时，用 ring-attention 逐块传）。</li>
+    <li><b>Decode CP：</b>核心是沿 <b>T 维度切分 KV cache</b>。TP 先沿 H 维度切，但 H 有限，TP 放大后每卡 KV cache 被复制 tp_size/H 次；加 <code>-dcp</code> 沿序列维度继续切，消除复制。<code>-dcp</code> 不增加 GPU 数，取值范围 [1, tp_size/H]，越大复制越少、通信越多。KV cache 增长用交错（interleaving）策略切分。</li>
+    <li><b>实战：</b>DeepSeek-R1（MLA，1 个 kv-head）<code>-tp 8</code> 有 8 倍复制，加 <code>-dcp 8</code> 消除；Kimi-K2 <code>-tp 16</code> 用 <code>-dcp 16</code> 全消或 <code>-dcp 8</code> 降到 2 倍（节点内通信开销小）；Qwen3-235B-A22B（4 个 kv-head）<code>-tp 8</code> 配 <code>-dcp 2</code>。经验法则：先把 tp 加到性能满意，再加 dcp 消复制。</li>
+    <li><b>与训练 CP 对照：</b>同一思想（沿 sequence 切），目标不同——训练要吞吐+显存，推理要延迟+KV cache 利用率。</li>
+  </ul>
+  <div class="meta"><span class="tag">并行策略（推理）</span><span>收藏于 2026-09-30</span><span>中文精读：goal/files/vLLM上下文并行部署-中文精读.md</span></div>
 </div>
 
 <h2>推理可观测</h2>
 <div class="card">
   <h3><a href="https://docs.vllm.ai/en/latest/usage/metrics/">vLLM 生产环境监控指标</a></h3>
-  <div class="orig">原文：Production Metrics — vLLM（官方文档）</div>
-  <p><code>/metrics</code> 端点暴露的全部指标：请求成功数、KV cache 使用率、TTFT、decode 耗时、排队时间、前缀缓存命中率、推测解码接受率、MFU 估算的 FLOPs / 访存量等。做推理性能优化时，用来对照定位瓶颈的指标手册。</p>
-  <div class="meta"><span class="tag">推理可观测</span><span>收藏于 2026-09-30</span></div>
+  <div class="orig">原文：Production Metrics — vLLM（官方文档）｜ 中文精读已完成</div>
+  <p><code>/metrics</code> 端点（Prometheus 格式）。排障速查：</p>
+  <ul>
+    <li><b>TTFT 高</b> → <code>request_prefill_time_seconds</code> + <code>kv_cache_usage_perc</code>（cache 满会导致 prefill 排队）；</li>
+    <li><b>decode 慢</b> → <code>request_decode_time_seconds</code> + <code>time_per_output_token_seconds</code>；</li>
+    <li><b>排队久</b> → <code>num_requests_waiting_by_reason</code> 区分容量问题还是 LoRA/KV 约束；</li>
+    <li><b>吞吐上不去但卡不忙</b> → <code>iteration_tokens_total</code>（batch 没打满）+ <code>num_preemptions</code>（频繁抢占说明 KV 压力大）。</li>
+    <li>另有前缀缓存命中率、推测解码接受率、MFU 估算（FLOPs/访存量，需 <code>--enable-mfu-metrics</code>）、NIXL/CPU-offload 的 KV 传输指标。</li>
+  </ul>
+  <div class="meta"><span class="tag">推理可观测</span><span>收藏于 2026-09-30</span><span>中文精读：goal/files/vLLM生产监控指标-中文精读.md</span></div>
 </div>
 
 <h2>学习洞察</h2>
-<div class="insight"><b>2026-09-30：</b>推理和训练的并行策略有部分是通用的（如 TP、CP 在两边都出现），只是优化目标不同。</div>
+<div class="insight"><b>2026-09-30：</b>推理和训练的并行策略有部分是通用的（如 TP、CP 在两边都出现），只是优化目标不同。<br><b>2026-09-30：</b>三篇中文精读完成。MLSysBook 章是并行策略的"教科书"，TorchTitan 4D 并行（FSDP+TP+PP+CP）正是其混合并行理论的工程实现；vLLM 的 decode CP 展示了 CP 在推理侧的用法（消 TP 带来的 KV cache 复制）。下一步可按此顺序深挖：DP/FSDP → TP → PP → CP → 组合策略。</div>
+
+<div class="note">完整中文精读笔记存放在学习目标 workspace 的 files/ 目录：分布式训练-MLSysBook-中文精读.md、vLLM上下文并行部署-中文精读.md、vLLM生产监控指标-中文精读.md</div>
 
 </body>
 </html>
