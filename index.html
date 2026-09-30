@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>预训练学习 · 资料库</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 28px; }
+  h2 { font-size: 18px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  .card h3 { font-size: 16px; margin: 0 0 4px; }
+  .card h3 a { color: #1a56db; text-decoration: none; }
+  .card h3 a:hover { text-decoration: underline; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 8px; }
+  .card p { font-size: 14px; line-height: 1.7; margin: 0 0 10px; color: #444; }
+  .meta { font-size: 12px; color: #999; display: flex; gap: 12px; flex-wrap: wrap; }
+  .tag { background: #eef4ff; color: #1a56db; border-radius: 4px; padding: 2px 8px; }
+  .insight { background: #fffbe6; border: 1px solid #f0e6b8; border-radius: 10px; padding: 14px 18px; font-size: 14px; line-height: 1.7; }
+  .insight b { color: #8a6d00; }
+</style>
+</head>
+<body>
+<h1>🚀 预训练学习 · 资料库</h1>
+<div class="sub">目标：掌握大模型预训练技术 ｜ 发送文章 URL 即自动归档到本页 ｜ 更新于 2026-09-30</div>
+
+<h2>并行策略（训练）</h2>
+<div class="card">
+  <h3><a href="https://mlsysbook.ai/vol2/distributed_training/distributed_training.html">机器学习系统（规模化）：分布式训练</a></h3>
+  <div class="orig">原文：Machine Learning Systems at Scale — Distributed Training（MLSys Book Vol.2）</div>
+  <p>从第一性原理讲分布式训练：fleet law、通信-计算比、3D 并行立方体 (d,p,t)、DP / TP / PP 各自的通信代价与硬件带宽匹配原则、ZeRO 内存分片、pipeline bubble 与 microbatch 调度、混合并行选型决策树。适合当作并行策略的系统性教材精读。</p>
+  <div class="meta"><span class="tag">并行策略（训练）</span><span>收藏于 2026-09-30</span></div>
+</div>
+
+<h2>并行策略（推理）</h2>
+<div class="card">
+  <h3><a href="https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/#decode-context-parallel">vLLM 上下文并行部署</a></h3>
+  <div class="orig">原文：Context Parallel Deployment — vLLM（官方文档）</div>
+  <p>prefill 和 decode 分开设计上下文并行：prefill CP 把长请求的 QKV 按 chunk 分到多卡并行计算，控制首 token 延迟（TTFT）；decode CP 的核心是沿序列维度切分 KV cache，解决张量并行带来的 KV cache 复制问题——比如 DeepSeek-R1 开 <code>-tp 8</code> 会有 8 倍 KV cache 复制，加上 <code>-dcp 8</code> 即可消除。支持 MLA / GQA 模型，可与多 token 预测（MTP）组合。与训练侧的 CP 原理相通（都是沿 sequence 切分），但优化目标不同：训练要吞吐和显存，推理要延迟和 KV cache 利用率。</p>
+  <div class="meta"><span class="tag">并行策略（推理）</span><span>收藏于 2026-09-30</span></div>
+</div>
+
+<h2>推理可观测</h2>
+<div class="card">
+  <h3><a href="https://docs.vllm.ai/en/latest/usage/metrics/">vLLM 生产环境监控指标</a></h3>
+  <div class="orig">原文：Production Metrics — vLLM（官方文档）</div>
+  <p><code>/metrics</code> 端点暴露的全部指标：请求成功数、KV cache 使用率、TTFT、decode 耗时、排队时间、前缀缓存命中率、推测解码接受率、MFU 估算的 FLOPs / 访存量等。做推理性能优化时，用来对照定位瓶颈的指标手册。</p>
+  <div class="meta"><span class="tag">推理可观测</span><span>收藏于 2026-09-30</span></div>
+</div>
+
+<h2>学习洞察</h2>
+<div class="insight"><b>2026-09-30：</b>推理和训练的并行策略有部分是通用的（如 TP、CP 在两边都出现），只是优化目标不同。</div>
+
+</body>
+</html>
