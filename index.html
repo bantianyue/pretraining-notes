@@ -100,6 +100,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐</span><span class="tag">推理可观测</span><span>收藏于 2026-09-30</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">07</span>《How to make your models fast》GEMM 章</h3>
+  <p>从第一性原理手写 CUDA GEMM：naive → coalesced → shared-memory tiled → 1D/2D register tiled。coalescing 修"怎么请求"，tiling 修"请求多少次"；tile 不是越大越好（寄存器压力/occupancy）。Modular kernel 优化的"亲手写一遍"版。</p>
+  <div class="links">
+    <a class="cn" href="pages/gemm-cuda.html">中文精读 →</a>
+    <a class="en" href="https://athleticcoder21.github.io/inference-book/gemm/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">CUDA</span><span>收藏于 2026-09-30</span></div>
+</div>
+
 <h2>学习洞察</h2>
 <div class="insight">
 <b>2026-09-30：</b>推理和训练的并行策略有部分通用（TP、CP 两边都出现），只是优化目标不同。<br>
