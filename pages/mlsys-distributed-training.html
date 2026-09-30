@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MLSysBook《分布式训练》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>MLSysBook《分布式训练》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://mlsysbook.ai/vol2/distributed_training/distributed_training.html">https://mlsysbook.ai/vol2/distributed_training/distributed_training.html</a></div>
+<h1>《Machine Learning Systems at Scale》分布式训练 · 中文精读</h1>
+<blockquote>
+<p>原文：https://mlsysbook.ai/vol2/distributed_training/distributed_training.html（MLSys Book Vol.2）
+精读日期：2026-09-30 ｜ 归属学习目标：掌握大模型预训练技术（并行策略第一课）</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>分布式训练不是"硬件乘法"，而是<strong>约束满足问题</strong>：在模型参数量 (P)、batch size (B)、互联带宽三重约束下，选择把开销（通信 / 同步 / 空闲）转移到最不紧的那一环。所有并行策略都只是"把循环变换搬到集群上"——DP 是并行 for 循环（按 batch 展开），TP 是向量化/SIMD（按矩阵乘内层循环展开，NVLink 当向量寄存器），PP 是指令流水线（按 layer 分段）。</p>
+<h2>1. 物理约束：fleet law 与通信-计算比</h2>
+<p>单步时间分解（fleet law）：</p>
+<pre><code>T_step(N) = T_compute / N + T_comm(N) + T_sync(N) - T_overlap
+</code></pre>
+<p>关键量是<strong>通信-计算比</strong> ρ = T_comm(N) / (T_compute/N)：</p>
+<ul>
+<li>ρ &lt;&lt; 1：计算 bound，理想状态（大 batch 的 ResNet 类稠密模型）；</li>
+<li>ρ ≈ 1：通信 bound，LLM 和 DLRM 推荐模型的常态，参数同步打满网络。</li>
+</ul>
+<p>三个"必须上分布式"的信号：<strong>显存耗尽</strong>（Adam 混合精度训练，约 5B 参数就吃满 80GB 卡，还没算 activation）、<strong>训练时长不可接受</strong>（GPT-3 175B 用 V100 集群是日历逼的）、<strong>数据集规模</strong>（TB 级数据，单机喂不饱）。</p>
+<p>Amdahl 定律的通信版：如果单步 30% 时间花在同步上，加速比上限就是 1/0.3 ≈ 3x，加再多卡也没用。</p>
+<p>能量税：HBM 内搬运约 1.5 pJ/bit，NVLink 约 7.5 pJ/bit，InfiniBand 约 35 pJ/bit——通信越远越贵。</p>
+<h2>2. 数据并行（DP）</h2>
+<p><strong>定义</strong>：每块卡一份完整模型副本，各自算不同数据分片，AllReduce 同步梯度后做完全相同的参数更新。</p>
+<ul>
+<li>数学等价性：各 worker 梯度取平均 = 在大 batch 上的梯度（期望线性性）。不等 batch 时是加权平均。</li>
+<li>全局 batch = N × B_local。</li>
+<li>五阶段流水线：切分数据 → 分发 batch → 独立前向/反向 → AllReduce 同步梯度 → 各自更新参数（去中心化更新，因为梯度已一致）。</li>
+</ul>
+<h3>2.1 梯度同步：AllReduce</h3>
+<ul>
+<li>P 参数、N 卡，每步每 worker 约传 2P(N-1)/N 个梯度值。</li>
+<li>Ring AllReduce：带宽最优，延迟随跳数线性增长；Tree：延迟 O(log N)，小消息占优；NCCL 按消息大小和拓扑自动选（层级算法：节点内 tree/ring + 节点间 ring）。</li>
+<li>参数服务器（PS）是反面教材：稠密模型下 server 入向带宽成为单点瓶颈（incast），N 卡的梯度流同时打向一台机器。</li>
+</ul>
+<h3>2.2 同步模型：BSP / SSP / Async</h3>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>一致性</th>
+<th>吞吐</th>
+<th>收敛</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BSP（ bulk synchronous）</td>
+<td>强</td>
+<td>受最慢 worker 限制</td>
+<td>等价单卡</td>
+<td>最终训练、要可复现</td>
+</tr>
+<tr>
+<td>SSP（stale synchronous）</td>
+<td>有界过期（落后 ≤ s 步）</td>
+<td>高于 BSP</td>
+<td>调参后接近等价</td>
+<td>超参搜索</td>
+</tr>
+<tr>
+<td>Async SGD</td>
+<td>弱</td>
+<td>最高</td>
+<td>退化，需补偿</td>
+<td>大规模异构集群</td>
+</tr>
+</tbody>
+</table>
+<p>生产教训：BSP 下 AllReduce 是隐式 barrier——一个 worker 挂掉/掉队，全部卡住。1000 卡、每卡每步 1% 掉队概率 ≈ 每步 10 卡掉队。需要 watchdog 超时、heartbeat、弹性训练。</p>
+<h3>2.3 DP 的三堵墙</h3>
+<ol>
+<li><strong>显存墙</strong>：每卡存全量参数+梯度+优化器状态，175B 模型要 1TB+/卡。</li>
+<li><strong>带宽墙</strong>：AllReduce 开销 2(N-1)/N × M/BW_net，随 N 增长最终吃掉 step 时间（LLM 常占 50%+）。</li>
+<li><strong>Batch 陷阱</strong>：全局 batch 超过 critical batch size 后，统计效率下降，加数据不如加步数。</li>
+</ol>
+<p><strong>Napkin math（GPT-2）</strong>：8 卡单节点 NVLink 并行效率 99.4%；32 卡跨 4 节点走 10GbE，效率掉到 27.9%（通信占 72% 时间）。解法：梯度累积——8 卡 × batch16 × 累积 4 步 = 同等有效 batch 512，只在节点内 NVLink 同步，成本从 $3021 降到 $400。</p>
+<h3>2.4 ZeRO / FSDP：分片式数据并行</h3>
+<p>混合精度 Adam 每参数 16 字节（FP16 权重 2 + FP16 梯度 2 + FP32 master/momentum/variance 12）。7B 模型 = 112GB，单卡 80GB 放不下。</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>切分对象</th>
+<th>显存降低</th>
+<th>通信代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ZeRO-1</td>
+<td>优化器状态</td>
+<td>~4x</td>
+<td>与 DDP 相同（免费）</td>
+</tr>
+<tr>
+<td>ZeRO-2</td>
+<td>+ 梯度</td>
+<td>~8x</td>
+<td>ReduceScatter 代替 AllReduce</td>
+</tr>
+<tr>
+<td>ZeRO-3 / FSDP</td>
+<td>+ 参数</td>
+<td>~N（线性）</td>
+<td>每层前向 AllGather（即时重建，用完即丢）</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>ZeRO-3 64 卡：7B 模型每卡状态 112GB/64 ≈ 1.75GB（0.25 字节/参数）。</li>
+<li>代价：FSDP 每步约 3N_L 次集合通信（前向 AllGather + 反向 AllGather + ReduceScatter），总量约 3M_state vs DDP 的 2M_state，多 10–25% 开销；但可以和计算 overlap（算 layer i 时预取 layer i+1 参数）。</li>
+<li>选型：模型轻松放下 → DDP；显存吃紧 → ZeRO-2；参数本身超单卡 → ZeRO-3/FSDP。<strong>误区：分片不是免费午餐，AllGather 上了关键路径，慢网络/小 batch 下反而更慢。</strong></li>
+</ul>
+<h3>2.5 扩展效率与收敛</h3>
+<p>扩展效率 η = T_1 / (N × T_N)。175B 模型纯 DP 在 1024 卡上只有约 37.5%。</p>
+<ul>
+<li>模型越大越好扩展（单位 step 的计算量大，通信占比小）——"大模型反而好扩展"。</li>
+<li>存在 scaling cliff：175B 在 1024–4096 卡是经济区（效率 &gt;70%），超 8192 卡效率 &lt;50%，多花的钱买的是闲置。</li>
+<li>大 batch 改变优化 landscape：线性 scaling rule + warmup（Goyal 2017 一小时训完 ImageNet：256 卡、全局 batch 8192）。</li>
+<li>梯度累积 4 步：同步频率降 75%，注意实现上是复用同一块梯度 buffer 原地累加，不是存 4 份。</li>
+</ul>
+<h2>3. 模型并行：切的是模型，不是数据</h2>
+<p>三种切法：按层切（layer-wise）、按通道/矩阵切（TP）、按注意力头切。layer 切省显存但引入串行依赖；channel/head 切并行度高但要更快的层内通信。</p>
+<p>175B 的例子：ZeRO-3 把静态状态压到每卡 43.8GB（64 卡），但 activation（seq 2048、batch 1 就要 ~50GB/卡）压不下去——<strong>ZeRO 切不动 activation，必须上模型并行</strong>。</p>
+<h2>4. 流水线并行（PP）</h2>
+<p><strong>定义</strong>：把连续的层分到不同 stage，前向传 activation、反向传梯度（点对点），用 microbatch 让各 stage 重叠工作。</p>
+<ul>
+<li>stage 间通信量：B_μ × S × d_model × 2 字节（BF16），如 d=8192、S=2048、microbatch=1 时每边界约 32MB——跟 DP 的 GB 级 AllReduce 比是小巫，<strong>可以走 InfiniBand 跨节点</strong>。</li>
+<li><strong>Pipeline bubble</strong>：(p-1)/(m+p-1)。p=8、m=32 时约 18%；p=16、m=16 时高达 48%。想压到 10% 以下需要 m &gt;&gt; p，但 microbatch 多了 activation 显存又涨——这是 PP 的核心 trade-off（利用率换显存）。</li>
+<li>调度演进：</li>
+<li><strong>GPipe</strong>（2019）：同步 microbatch，全前向再全反向，activation 峰值 O(m×p)；</li>
+<li><strong>1F1B</strong>：一前一后交错，activation 峰值降到 O(p)，省下的显存可以堆更多 microbatch（m &gt;&gt; p），从而压小 bubble；</li>
+<li><strong>Zero-bubble</strong>：把反向拆成 B 核（算 activation 梯度 dL/dX，走关键路径，立即发给上一 stage）和 W 核（算权重梯度 dL/dW，可延迟），用 W 填 bubble，代价是 activation 要多存一阵（显存换时间，可配 activation checkpointing 对冲）。</li>
+</ul>
+<h2>5. 张量并行（TP）</h2>
+<p><strong>定义</strong>：把单个矩阵乘法拆到多卡——列并行拆 QKV 投影、行并行拆输出投影。</p>
+<ul>
+<li><strong>Megatron 的关键设计</strong>：列并行层 + 行并行层配对，中间 activation 不用通信，每 transformer block 只需 <strong>2 次 AllReduce</strong>（attention 后一次、MLP 后一次）。</li>
+<li>通信量：每层 AllReduce 传 B×S×d_model×2 字节（BF16）。t=8、NVLink 900GB/s 时每次约 0.1–0.5ms；换成 InfiniBand 50GB/s 则 2–10ms/层，96 层就是 200–960ms 纯同步——<strong>TP 只能待在 NVLink 节点内</strong>，跨节点 MFU 跌到个位数。</li>
+<li>TP 超过 8 路收益快速衰减：切分省了显存，但每卡的计算量也小了，盖不住通信。Llama 3 405B 用 TP=8（H100 节点内）。</li>
+</ul>
+<h3>5.1 序列维度并行：Ring Attention</h3>
+<p>TP 切的是矩阵维度，序列维度也能切：每卡持有 Q 的一块，K/V 块在环上轮转，每轮算 local Q × 当前 K/V，同时把 K/V 传给邻居（通信与计算 overlap）。N 卡把上下文长度放大 N 倍——<strong>这就是训练侧的"上下文并行"</strong>，和 vLLM decode CP 沿 T 切 KV cache 是同一思想。</p>
+<h2>6. 专家并行（EP，MoE 专用）</h2>
+<p>每个 token 经 gating 选 top-1/top-2 专家 → <strong>All-to-All dispatch</strong> 把 token 发到专家所在的卡 → 专家计算 → <strong>All-to-All combine</strong> 发回。每 MoE 层每 pass 2 次 All-to-All，吃的是集群 bisection 带宽。</p>
+<ul>
+<li>解耦参数量与计算量：万亿参数 MoE，每 token 只激活 ~10B。</li>
+<li>生产坑：路由天然偏斜，热专家收到 3–5 倍流量。用 <strong>capacity factor</strong> C（1.25–1.5）硬限每专家 token 上限，超了直接 drop 走残差；再加 <strong>auxiliary load balancing loss</strong>（权重 0.01–0.1）罚路由偏斜。Mixtral 8x7B 用 top-2 / 8 专家。</li>
+</ul>
+<h2>7. 混合并行：3D 并行与层级感知</h2>
+<p>N_total = d × p × t。175B 在 1024 卡（128 节点 × 8 卡）的三种配置对比：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>做法</th>
+<th>效率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A：纯 DP-1024</td>
+<td>350GB 梯度全集群 AllReduce</td>
+<td>~37.5%</td>
+</tr>
+<tr>
+<td>B：TP-8 + DP-128</td>
+<td>TP 锁在 NVLink 节点内；DP 只同步 1/8 参数分片（43.75GB）</td>
+<td>75–85%（+overlap）</td>
+</tr>
+<tr>
+<td>C：TP-8 + PP-4 + DP-32</td>
+<td>DP 同步量再降到 1/32；代价是 pipeline bubble（p=4、m=32 时约 9%）</td>
+<td>更高</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Hierarchy-aware parallelism（层级感知并行）</strong>：把通信画到带宽地形上——</p>
+<ul>
+<li>TP（高频小消息，延迟敏感）→ NVLink 节点内（600–900GB/s）；</li>
+<li>PP（stage 边界点对点，中等）→ 同 rack/邻近节点 InfiniBand（50–100GB/s）；</li>
+<li>DP（量大但每步一次，可 overlap）→ 全集群。</li>
+</ul>
+<p>反过来，组网 topology 也要按并行策略协同设计（rail-optimized vs fat-tree 选错=白花钱）。</p>
+<p>TorchTitan 的 4D 并行 = FSDP（ZeRO-3）+ TP + PP + CP，正是这一套的工程实现：FSDP 切状态、TP 切层内矩阵（节点内）、PP 切层（跨节点）、CP 切序列（长上下文）。</p>
+<h2>8. 其他要点</h2>
+<ul>
+<li><strong>FP8 训练</strong>：E4M3（±448）放权重/前向 activation，E5M2（±57344）放梯度；三精度栈 FP32 master + FP8 GEMM + FP16 累加；核心是 per-tensor dynamic scaling。FP8 减的是 payload 字节数，不改变并行轴。</li>
+<li><strong>容错</strong>：集群 MTBF 随规模指数塌（100 节点、每节点 99.9%/小时存活 → 集群 MTBF 约 10 小时）；checkpoint 最优间隔 Young-Daly 公式 √(2·T_write·MTBF)。</li>
+<li><strong>参数服务器</strong>只在稀疏场景（推荐系统 10TB embedding 表）有意义，稠密 LLM 训练已被 AllReduce 取代。</li>
+</ul>
+<h2>9. 关键 takeaways（原文 Key Takeaways 翻译）</h2>
+<ol>
+<li>切分工作只是<strong>搬运瓶颈</strong>：把显存压力变成通信量、同步延迟或流水线空闲。赢的策略是把开销送到最不紧的那一环。</li>
+<li>DP 止于收敛：全局 batch 超过 critical batch size 后，"加卡"变成"更慢/更不稳定"，除非同步调 schedule、warmup 和累积。</li>
+<li>分片用消息买显存：ZeRO/FSDP 让 100B+ 模型成为可能，代价是更紧的 ReduceScatter/AllGather 节奏，必须 overlap 藏起来。</li>
+<li>TP 属于 NVLink：层内矩阵切分需要节点内高带宽 fabric，拉到机架间就变成通信瓶颈。</li>
+<li>PP 用 bubble 换字节：m &gt;&gt; p 才能把深度变成吞吐。</li>
+<li>3D 立方体是硬件地图：前沿训练必然组合多种并行，因为没有单一轴能同时装下模型和集群。</li>
+</ol>
+<hr />
+<p><em>注：本笔记是精读提炼，不是全文翻译。公式与数字均出自原文，阅读时建议对照原文图表（3D 并行立方体、ZeRO 切分图、pipeline 调度图、TP 矩阵切分图）。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
