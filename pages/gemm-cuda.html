@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《How to make your models fast》GEMM · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《How to make your models fast》GEMM</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://athleticcoder21.github.io/inference-book/gemm/">https://athleticcoder21.github.io/inference-book/gemm/</a></div>
+<h1>《How to make your models fast》GEMM 章 · 中文精读</h1>
+<blockquote>
+<p>原文：https://athleticcoder21.github.io/inference-book/gemm/（英文，带 CUDA 代码实测）
+精读日期：2026-09-30 ｜ 主题：Kernel 优化（CUDA GEMM 手写优化）｜ ⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>从第一性原理手写 CUDA GEMM：naive → coalesced → shared-memory tiled → 1D/2D register tiled。每一次优化都把瓶颈往计算单元推近一层——<strong>GEMM 的方程从没变过，变的是数据的"所有权"和复用层级</strong>。</p>
+<h2>1. 优化阶梯（对应原文 #comparing-the-kernels 对比表）</h2>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>每线程输出数</th>
+<th>改了什么</th>
+<th>还剩什么代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Naive row-first</td>
+<td>1</td>
+<td>直接实现</td>
+<td>A 读和 C 写都是跨步访问（stride）</td>
+</tr>
+<tr>
+<td>Coalesced direct</td>
+<td>1</td>
+<td>x 方向线程负责连续列</td>
+<td>输入仍为每个输出重复请求</td>
+</tr>
+<tr>
+<td>Shared-memory tiled</td>
+<td>1</td>
+<td>一次全局加载供整个 block 复用</td>
+<td>每次乘加仍要 2 次 shared memory 加载</td>
+</tr>
+<tr>
+<td>1D register tiled</td>
+<td>T_M</td>
+<td>复用一个 B 值</td>
+<td>只在一个方向复用</td>
+</tr>
+<tr>
+<td>2D register tiled</td>
+<td>T_M×T_N</td>
+<td>两个输入 fragment 都复用</td>
+<td>寄存器压力</td>
+</tr>
+</tbody>
+</table>
+<p>三句话版本：
+- <strong>coalescing</strong>：让相邻线程请求相邻内存；
+- <strong>shared tiling</strong>：让一次全局加载服务多个线程；
+- <strong>register tiling</strong>：让一次 shared memory 加载服务一个线程的多个输出。</p>
+<h2>2. 关键细节</h2>
+<ul>
+<li><strong>Naive kernel 的算术强度</strong>：约 0.25 FLOPs/byte，memory bound。更糟的是访存模式：warp 内相邻线程读 A 的值相隔 K 个元素，按 32-byte sector 模型，A 读取效率只有 12.5%（1024 字节传了只用 128）。</li>
+<li><strong>Coalescing 修复</strong>：把 <code>threadIdx.x</code> 映射到输出列，相邻线程读 B 的连续值、写 C 的连续值。单步 dot 的输入流量从 1056 字节降到 160 字节，C 写小 8 倍。但<strong>coalescing 只修了"怎么请求"，没修"请求多少次"</strong>——A 仍被请求 MNK 次（实际只有 MK 个值）。</li>
+<li><strong>Shared memory tiling</strong>：block 拥有固定的 C 输出 tile，沿 K 维度走，每次加载一对 A/B 输入 tile 进 shared memory，累加 partial 结果。全局加载次数大降。</li>
+<li><strong>Register tiling</strong>：线程拥有 micro-tile（如 8×8），从 shared memory 加载短 fragment，做 outer product，两边 fragment 都被复用多次。16 次 shared 加载产生 64 次乘加（原来只能产生 8 次）。</li>
+<li><strong>Tile 不是越大越好</strong>：shared memory 容量、寄存器压力、occupancy、边缘浪费、矩阵形状都会影响。寄存器不够会 spill 到 local memory，前功尽弃。最终 kernel 取 B_M=B_N=128、B_K=8、T_M=T_N=8（block 256 线程）。</li>
+</ul>
+<h2>3. Takeaways（原文）</h2>
+<ol>
+<li>GEMM 的高算术强度只是"机会"，kernel 必须让复用真正发生；</li>
+<li>线程映射在 tiling 之前就重要（<code>threadIdx.x</code> 变化最快 → 映射到列）；</li>
+<li>Coalescing 和复用是两回事；</li>
+<li>一个 block 拥有一个固定的输出 tile；</li>
+<li>Shared tiling 只是第一级复用；register tiling 让一个线程拥有多个输出；</li>
+<li>大 tile 不自动更好。</li>
+</ol>
+<h2>4. 与知识库其他内容的关系</h2>
+<ul>
+<li>Modular《Kernel Optimization》讲"为什么要做 kernel 优化、用什么工具"，这一章是<strong>亲手写一遍</strong>——Triton/CUDA 层的具体体感；</li>
+<li>FlashAttention 的 tiling+fusion 思想与这里的 shared/register tiling 同源，只是用在了 attention 上；</li>
+<li>对训练的意义：GEMM 是 transformer 90% 以上的 FLOPs，理解这套复用层级才能读懂 FA、cuBLAS 背后的取舍。</li>
+</ul>
+<hr />
+<p><em>注：本笔记是精读提炼。原文配有 CUDA 代码（kernels/gemm/）和 tiling 动画，动手跑一遍效果最好。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
