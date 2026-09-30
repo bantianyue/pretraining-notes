@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modular《Kernel Optimization》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Modular《Kernel Optimization》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://handbook.modular.com/kernel-optimization/">https://handbook.modular.com/kernel-optimization/</a></div>
+<h1>Modular《Kernel Optimization》· 中文精读</h1>
+<blockquote>
+<p>原文：https://handbook.modular.com/kernel-optimization/（LLM Inference Handbook，Modular）
+精读日期：2026-09-30 ｜ 主题：Kernel 优化（推理）
+注：该 URL 是目录页，实质内容在 4 个子页面，本笔记覆盖其中 3 个核心页面：
+Kernel optimization for LLM inference、Choosing the right kernel optimization tool、FlashAttention。</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>Kernel 优化回答的是"单个算子在 GPU 上跑多快"，系统优化（batching/caching/routing）回答的是"请求在整体 serving 架构里流得多顺"——两层都重要，但解决的是不同问题。Kernel 层是上面一切的天花板：kernel 不行，runtime 再怎么调也补不回来。</p>
+<h2>1. 什么是 kernel 优化</h2>
+<p>LLM 每生成一个 token，GPU 执行一串高度并行的操作：矩阵乘、attention、归一化、激活函数。这些操作由 GPU kernel 实现（同时跑在大量线程上的函数）。多个操作可以<strong>融合成一个 kernel</strong>——这是最有效的优化手段之一。</p>
+<p>Kernel 优化 = 让这些函数跑得更快更省，手段：降延迟、提硬件利用率（计算单元/显存带宽）、<strong>减少数据搬运</strong>。</p>
+<p>两条路线：</p>
+<ul>
+<li><strong>手写 kernel</strong>：CUDA 或 Triton 等 DSL 直接写调。控制粒度最细（访存模式、线程排布、计算调度），但需要深厚的 GPU 架构功底。Triton 是折中：tile-based 编程模型藏掉了 warp 管理、shared memory 调度等细节，比裸 CUDA 好写，但控制力介于 CUDA 和纯编译器之间。</li>
+<li><strong>编译器驱动</strong>：TVM、XLA 等从高层计算描述自动生成优化 kernel（融合、重排、自动调优）。门槛低，但对新架构/新算子模式跟进慢，峰值性能通常打不过手写。</li>
+</ul>
+<h3>Kernel fusion（核融合）的例子</h3>
+<p><code>y = silu(h + bias) * scale</code>：</p>
+<ul>
+<li>不融合：3 次 kernel launch，6 次 HBM 往返；</li>
+<li>融合：1 次 launch，2 次 HBM 往返，中间结果不出片上内存。</li>
+</ul>
+<p>HBM ↔ 片上内存的搬运远贵于计算本身——<strong>融合的本质是减少 HBM round-trip</strong>。</p>
+<h3>为什么大多数团队不碰这一层</h3>
+<p>vLLM / SGLang / TensorRT-LLM 把 kernel 全抽象掉了。但这层决定天花板：</p>
+<ol>
+<li><strong>新架构需要新 kernel</strong>：新 attention 机制、新 tensor 形状出来，不是"用 PyTorch 写出来"就行，得有人写出高效 kernel 并集成进框架，否则框架只能回退到慢速通用实现，甚至不支持。FlashAttention 就是典型：它不是某个推理框架发明的，是独立的 kernel 优化，证明价值后被框架收编。</li>
+<li><strong>性能天花板真实存在</strong>：框架只是 kernel 集合上的编排层，推理速度超不过底层 kernel 允许的上限。</li>
+<li><strong>硬件可移植性</strong>：手写 CUDA kernel 锁死 NVIDIA；想上 AMD/其他加速器就得重写。这就是可移植层和编译器方案越来越重要的原因（峰值性能 vs 可移植性的 trade-off）。</li>
+</ol>
+<h2>2. 工具选型：控制力的阶梯</h2>
+<p>从顶到底：cuBLAS/cuDNN（vendor 库）→ TVM/XLA（AI 编译器）→ Triton（kernel DSL）→ 手写 CUDA kernel；Mojo/MAX 想把语言+编译器+runtime+kernel 做成垂直整合的一整栈，打破分层边界。</p>
+<p>越往下走：控制力↑、需要的 GPU 功底和工程时间↑、免费的可移植性↓。</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>代表</th>
+<th>优点</th>
+<th>局限</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vendor 库</td>
+<td>cuBLAS/cuDNN</td>
+<td>常见算子开箱即强，继承 NVIDIA 按代调优（Ampere/Hopper）</td>
+<td>只覆盖已知 pattern；库边界之间难做跨算子融合；锁 NVIDIA</td>
+</tr>
+<tr>
+<td>AI 编译器</td>
+<td>TVM（auto-tuning 暴力搜 tile/schedule）、XLA/OpenXLA</td>
+<td>自动融合、版图优化、跨硬件</td>
+<td>峰值难打过手写/Tensor Core 利用不足；TVM 生态碎片化、auto-tuning 编译慢；GenAI 新算子跟不上</td>
+</tr>
+<tr>
+<td>Kernel DSL</td>
+<td>Triton</td>
+<td>tile 模型好写，适合自定义 attention、fused pointwise</td>
+<td>调试难、调优不自动、可移植性看后端成熟度</td>
+</tr>
+<tr>
+<td>手写 kernel</td>
+<td>CUDA</td>
+<td>极致控制，FlashAttention 诞生地</td>
+<td>开发贵、难维护（换代即失效）、硬件锁死</td>
+</tr>
+<tr>
+<td>全栈</td>
+<td>Mojo + MAX</td>
+<td>一门语言从模型写到 kernel；MLIR 编译到多后端（warp 同步、Tensor Core 指令按目标生成），写一次跑 NVIDIA/AMD/Apple GPU</td>
+<td>生态成熟度待验证</td>
+</tr>
+</tbody>
+</table>
+<p><strong>选型流程</strong>（原文建议）：算子是标准的 → 先用 vendor 库/框架自带；图级别能消 HBM 往返 → AI 编译器；要自定义 kernel 但不想写 CUDA C++ → Triton；要 kernel 级控制 + 跨硬件可移植 → Mojo/MAX；关键瓶颈要在特定硬件榨干 → 手写 CUDA。</p>
+<h2>3. FlashAttention：kernel 优化的标杆案例</h2>
+<p>标准 attention 是 <strong>memory-bound</strong>：N×N 的 attention 矩阵要写回 HBM 再读回来，16K token 的内存是 1K 的 256 倍，大部分时间在等数据搬运，不是计算。</p>
+<p>FlashAttention 的两招：</p>
+<ol>
+<li><strong>Tiling + 重算</strong>：把计算切成能塞进 SRAM 的块，Q/K/V tile 进 SRAM、整块算完、增量更新输出、中间结果直接丢——<strong>N×N 矩阵永远不在 HBM 里物化</strong>；</li>
+<li><strong>Kernel fusion</strong>：matmul → softmax → matmul 融成一个 kernel，无 HBM 中间写、无多次 launch 开销。</li>
+</ol>
+<p>效果：attention 快 2–4 倍，显存大降，上下文做到 128K+。版本演进：</p>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>年份</th>
+<th>要点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FA-1</td>
+<td>2022</td>
+<td>IO-aware tiled attention，首创</td>
+</tr>
+<tr>
+<td>FA-2</td>
+<td>2023</td>
+<td>更好的 warp 级并行与任务划分，比 FA-1 快 2x</td>
+</tr>
+<tr>
+<td>FA-3</td>
+<td>2024</td>
+<td>Hopper 优化（FP8/BF16 Tensor Core、异步执行、warp specialization），H100 上 740 TFLOPS（75% 利用率）</td>
+</tr>
+<tr>
+<td>FA-4</td>
+<td>2026</td>
+<td>Blackwell 定制：全异步 MMA、更大 tile、软件模拟指数、tensor memory，B200 BF16 达 1613 TFLOPS/s（71% 利用率），用 CuTeDSL 编写（<code>flash_attn.cute</code>）</td>
+</tr>
+</tbody>
+</table>
+<p>FA-4 的洞察：Blackwell 上 Tensor Core 快了很多，但 shared memory 带宽、SFU（softmax 指数单元）、寄存器压力没跟上——瓶颈转移了，优化要跟着硬件的不对称扩展走。</p>
+<h2>4. 与预训练学习的关联</h2>
+<ul>
+<li>用户本就是 GPU kernel 优化深域（KernelAgent 等文章），这篇是推理侧 kernel 优化的系统入门，可与已有经验互补；</li>
+<li>FlashAttention 同时是<strong>训练侧</strong>核心 kernel（torch.compile / torchtitan 都依赖），训练 attention 的显存墙（MLSysBook 里 1.1TB activation 的例子）正是被 FA 这类 kernel 优化缓解的；</li>
+<li>选型阶梯对训练同样适用：torchtitan 底层大量用 Triton kernel + torch inductor（编译器），和这里讲的工具栈是同一套。</li>
+</ul>
+<hr />
+<p><em>注：本笔记是精读提炼，不是全文翻译。GPU 架构子页面（memory hierarchy、SM、Tensor Core、threads/warps）未展开，需要时可再精读。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
