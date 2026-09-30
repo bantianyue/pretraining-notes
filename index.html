@@ -74,6 +74,19 @@
   <div class="meta"><span class="tag">推理可观测</span><span>收藏于 2026-09-30</span><span>中文精读：goal/files/vLLM生产监控指标-中文精读.md</span></div>
 </div>
 
+<h2>Kernel 优化</h2>
+<div class="card">
+  <h3><a href="https://handbook.modular.com/kernel-optimization/">Modular：LLM 推理的 Kernel 优化</a></h3>
+  <div class="orig">原文：Kernel Optimization — LLM Inference Handbook（Modular）｜ 中文精读已完成（覆盖 3 个子页面）</div>
+  <ul>
+    <li><b>分层：</b>kernel 优化回答"单个算子在 GPU 上跑多快"，系统优化（batching/caching/routing）回答"请求在 serving 架构里流得多顺"。kernel 层是上面一切的天花板。</li>
+    <li><b>核融合：</b><code>y = silu(h + bias) * scale</code> 不融合要 3 次 launch、6 次 HBM 往返，融合后 1 次 launch、2 次往返——融合的本质是减少 HBM round-trip。</li>
+    <li><b>工具阶梯</b>（控制力↑、门槛↑、可移植性↓）：cuBLAS/cuDNN → TVM/XLA（auto-tuning）→ Triton（tile 模型）→ 手写 CUDA → Mojo/MAX（MLIR 一栈多后端，写一次跑 NVIDIA/AMD）。选型：标准算子用 vendor 库，图级消往返用编译器，自定义 kernel 用 Triton，要控制+可移植看 Mojo/MAX，榨干特定硬件才手写 CUDA。</li>
+    <li><b>FlashAttention：</b>tiling + 重算 + 融合，N×N attention 矩阵永不在 HBM 物化，快 2–4 倍。FA-1（2022）→ FA-2（warp 并行）→ FA-3（Hopper，H100 740 TFLOPS）→ FA-4（2026，Blackwell 定制，B200 1613 TFLOPS/s）。FA 同时是训练侧核心 kernel，缓解训练 attention 显存墙。</li>
+  </ul>
+  <div class="meta"><span class="tag">Kernel 优化</span><span class="tag">推理</span><span>收藏于 2026-09-30</span><span>中文精读：goal/files/Modular-Kernel优化-中文精读.md</span></div>
+</div>
+
 <h2>学习洞察</h2>
 <div class="insight"><b>2026-09-30：</b>推理和训练的并行策略有部分是通用的（如 TP、CP 在两边都出现），只是优化目标不同。<br><b>2026-09-30：</b>三篇中文精读完成。MLSysBook 章是并行策略的"教科书"，TorchTitan 4D 并行（FSDP+TP+PP+CP）正是其混合并行理论的工程实现；vLLM 的 decode CP 展示了 CP 在推理侧的用法（消 TP 带来的 KV cache 复制）。下一步可按此顺序深挖：DP/FSDP → TP → PP → CP → 组合策略。</div>
 
