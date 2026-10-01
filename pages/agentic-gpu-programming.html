@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《Agentic GPU Programming for MLSys》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《Agentic GPU Programming for MLSys》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://mlc.ai/agentic-gpu-programming-for-mlsys/">https://mlc.ai/agentic-gpu-programming-for-mlsys/</a></div>
+<h1>《Agentic GPU Programming for MLSys》· 中文精读</h1>
+<blockquote>
+<p>原文：https://mlc.ai/agentic-gpu-programming-for-mlsys/（英文，mlc.ai / CMU MLC 课程系列新书）
+精读日期：2026-10-01 ｜ 主题：Kernel 优化 × AI Agent ｜ ⭐⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>ML 系统依赖 fast GPU kernel（attention、GEMM、fused 算子），而写出这些 kernel 需要算法 + 硬件 + 编程模型的深厚功底。这本书讲的是：<strong>如何让 coding agent 来干这活</strong>——用 compiler 驱动的 harness（TIRx）给 agent 提供表达优化想法、诊断错误、测量性能、沉淀结果的环境，把"agent 写 kernel"变成可重复的工程流程。</p>
+<h2>1. 全书结构</h2>
+<ul>
+<li><strong>Part I：Agentic GPU 编程的要素</strong>——compiler 基础设施与 agent workflow 如何配合做迭代式 kernel 开发；领域专用程序分析、可复用的知识库、benchmark 与 profiling；对比不同 agent workflow，组合成有效的 GPU 优化策略。</li>
+<li><strong>Part II：TIRx Harness</strong>——一个具体的 compiler harness 实例：TIRx 编译器基础 + KCoral benchmark server（执行接口）。</li>
+<li><strong>Part III：实战</strong>——端到端教程。先用 Grouped GEMM 走通 workflow，再用录制的 Kimi Delta Attention（KDA）实战展示诊断与 review，最后是 advanced tips。</li>
+</ul>
+<h2>2. 实战一：Grouped GEMM（B200）</h2>
+<p>任务：M-grouped contiguous FP8 GEMM（<code>D_g = A_g B_g^T</code>，各 group 行数不同——MoE 典型形状），以 DeepGEMM 为正确性参照和性能基线，4 种配置（4/8 group，不同矩阵维度）。</p>
+<p>流程：
+1. 两台机器（可同一台）：agent 机 + 跑 KCoral 的 GPU server（<code>python -m kcoral server --gpus 0</code>）；
+2. <code>evolution/setup.py</code> 建任务 worktree（含 <code>PROMPT.md</code>、benchmark 命令、写作规范）；
+3. 先跑 baseline（DeepGEMM，确认 4/4 通过）；
+4. 启动 agent：<strong>goal mode</strong>（<code>/goal</code> 让优化目标跨 turn 存活，示例目标：相对基线 3x 加速）或 <strong>Flame Chase</strong>（两个 agent 轮流 fresh session 接力，24h 预算）。</p>
+<p>Agent 每轮：检索相关实现 → 写 candidate kernel → 提交分析 + GPU 实测 → 看反馈决定下一次实验。tile 大小、group 调度、layout、warp 分工、pipeline 都由 agent 自己定；成绩记在 <code>frontier/index.json</code>。</p>
+<h2>3. 实战二：Kimi Delta Attention（KDA）</h2>
+<p>更复杂的 attention 变体，用来展示 harness 的深层能力：
+- <strong>Synccheck / Racecheck</strong>：同步与访存序错误的编译器分析，agent 据此修复；
+- profiling 反馈指导下一步优化；
+- <strong>Review</strong>：审查 speedup 背后的假设，把发现变成更强的检查、更好的工具、可复用的 kernel。</p>
+<h2>4. 要素拆解（Part I/II 的核心思想）</h2>
+<ul>
+<li><strong>Compiler-driven harness</strong>：agent 不直接面对裸 CUDA，而是面对 TIRx 这样的编译器底座——表达优化想法有载体，错误有结构化诊断，性能有可复现测量。</li>
+<li><strong>领域专用程序分析</strong>：通用 lint 不够，要的是懂 GPU 语义的分析（同步、竞态、访存序）。</li>
+<li><strong>知识库</strong>：值得保留的结果沉淀下来，变成下一次搜索的起点（<code>frontier</code> 机制）。</li>
+<li><strong>Benchmark/Profiling</strong>：KCoral 提供隔离、可复现的 GPU 实测环境，preparation/compilation 不计入计时。</li>
+</ul>
+<h2>5. 与知识库其他内容的关系</h2>
+<ul>
+<li>这是"<strong>用 agent 做 kernel 优化</strong>"的方法论——用户（AI 圈的 9527）本人的深域正是 GPU kernel 优化（KernelAgent 系列），且日常就是用 agent（我）做 kernel 相关工作，这本书相当于把这套实践系统化了；</li>
+<li>与 Modular《Kernel Optimization》（工具阶梯：Triton/CUDA/Mojo）互补：那边讲"人用什么工具写 kernel"，这边讲"agent 在什么 harness 下写 kernel"；</li>
+<li>Grouped GEMM / MoE 形状与 MLSysBook 的专家并行、abcdabcd987（二）的 EP=64 讨论直接相关——MoE 的 kernel 实现正是 EP 落地的最后一公里。</li>
+</ul>
+<hr />
+<p><em>注：本笔记基于书的 landing 页 + "Launching the Agent" 章精读，是全书导览而非逐章翻译。各章深入时可再逐章精读。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
