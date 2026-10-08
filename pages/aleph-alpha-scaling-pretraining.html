@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《Scaling Pre-Training in Practice》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《Scaling Pre-Training in Practice》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://aleph-alpha.com/en/blog/scaling-pre-training-in-practice-a-hierarchical-approach/">https://aleph-alpha.com/en/blog/scaling-pre-training-in-practice-a-hierarchical-approach/</a></div>
+<h1>《Scaling Pre-Training in Practice: A Hierarchical Approach（Aleph Alpha）》· 中文精读</h1>
+<blockquote>
+<p>原文：https://aleph-alpha.com/en/blog/scaling-pre-training-in-practice-a-hierarchical-approach/（英文，Aleph Alpha 博客，Jordan Sassoon，2026-09-30）
+精读日期：2026-10-08 ｜ 主题：训练核心 / 并行策略 / torchtitan ｜ ⭐⭐⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>Aleph Alpha 实战复盘：30B-A3B MoE 模型从 16 张扩到 <strong>512 张 B200</strong>，只在小规模（16 卡）做搜索、用"分层"方法把结论搬到目标规模，最终 <strong>35.3% MFU</strong>，单卡效率只掉 6%，近似线性扩展。堆栈是自研优化版 torchtitan fork，64 节点 IB 互联、每节点 8×B200（NVLink）。</p>
+<h2>1. 指标：MFU 是好的，TPS 更好</h2>
+<ul>
+<li><strong>TPS</strong>（每卡每秒 token 数）：粗糙但诚实的速度度量，是他们真正优化的目标；</li>
+<li><strong>MFU</strong>：TPS 相对硬件峰值 FLOPS 的效率分数（BF16 峰值为分母），行业通用指标，用于横向对比；</li>
+<li><strong>mem</strong>：PyTorch reserved 内存 / 设备总量（reserved 决定 OOM 硬失败）。</li>
+<li>核心工程主题：<strong>通信-计算比</strong>——目标永远是 compute-bound，让通信 kernel（all_gather/reduce_scatter）被计算 kernel 完全掩盖。</li>
+</ul>
+<h2>2. 三个自由度</h2>
+<ol>
+<li><strong>并行策略（torchtitan 命名）</strong>：FSDP（ZeRO-3，权重/梯度/优化器状态分片，<code>all_gather</code> + <code>reduce_scatter</code>）× DP（模型副本数，<code>all_reduce</code> 平均梯度）；</li>
+<li><strong>Activation Checkpointing</strong>：full-AC（只存每层输入，重算最多）/ selective-AC（只存 attention/linear 等重算贵的算子）/ no-AC（全存）；</li>
+<li><strong>Local batch size</strong>：每卡每轮同时处理的序列数，直接决定 activation 内存占用。</li>
+<li>约束：<code>ga = gbs / (lbs × n_gpus)</code> 必须为正整数（gradient accumulation 步数），ga=1 时的 all_reduce 只需在最后一次 backward 做（其余步可省掉 DP 通信）。</li>
+<li>三个旋钮互相牵制：AC 策略决定内存→决定能放多大 lbs；FSDP 组越大权重分片越细→能放大 lbs→但通信组变大。</li>
+</ol>
+<h2>3. 分层方法：16 卡先把搜索空间打穿</h2>
+<p>基本单元 = 一个节点（8×B200）。在 8–16 卡做最大规模 sweep：FSDP∈{8,16} × DP∈{1,2} × AC∈{no/selective/full} × lbs 逐级扫到 OOM（seq_len 固定 4096）。
+- 16 卡峰值：<strong>28.4k TPS / 37.5% MFU</strong>；selective-AC 在 lbs≈18 达到峰值（92% 显存），full-AC 在 lbs≈38 达到峰值；
+- no-AC 小 batch 最快但 OOM 太早，退出竞争；
+- 8→16 卡跨节点（IB）TPS 无明显下降 → 通信介质够快，保持 compute-bound。
+- 结论：把 1/32 规模的结论（峰值 lbs 区间、最优 AC、FSDP 上限）<strong>直接带到大规摸</strong>，只在峰值附近微调，不再全空间重扫。</p>
+<h2>4. Profile 驱动：PyTorch trace 看通信掩盖</h2>
+<p>用 Perfetto 分析 trace，按 kernel 类型分组（all_gather / GEMM / Attention / Norm）：
+- 前向：下一层的 <code>all_gather</code> 预取与当前层计算完全重叠，compute stream 背靠背 → compute-bound；
+- 反向：<code>reduce_scatter</code> 同样被计算掩盖；引入 DP 后多出 <code>all_reduce</code>（只在最后一步做），形成 DP vs FSDP 的 push-pull：DP 度数越大 FSDP 组越小、通信越轻，反之亦然；
+- 小但实在的优化：backward 到下一次 forward 之间让权重<strong>常驻显存</strong>不重新分片/聚拢，目标规模约 +2~3% 吞吐。</p>
+<h2>5. 放大到 512 卡：FSDP 到头了，剩下的交给 DP</h2>
+<ul>
+<li>128 卡（FSDP=128）：selective-AC 28.0k TPS / 37.0% MFU（只掉 1.4%），full-AC 26.3k / 34.7%；</li>
+<li>前向通信已到"通信-bound"边界、反向仍明显 compute-bound → <strong>128 是 FSDP 度数的上限</strong>；</li>
+<li>512 卡最终配置：selective-AC, lbs=22, <strong>FSDP=128, DP=4</strong> → <strong>26.7k TPS / 35.3% MFU / 94% 显存</strong>；</li>
+<li>16→512 卡单卡效率只掉 6%。按此效率，20T token 在 512 卡上约 17 天；再加 DP 副本可压到 11 天。</li>
+</ul>
+<h2>6. 与知识库其他内容的关系</h2>
+<ul>
+<li>这是"<strong>并行策略如何组合</strong>"的完整实战：FSDP×DP 的度数分配、AC 与 lbs 的联动、profile 验证通信掩盖——正好是学习目标达标标准里的核心项；</li>
+<li>与 MLSysBook 分布式训练章互补：那边讲 fleet law 和并行原语，这边讲"16 卡小规模搜索 → 512 卡放大"的工程方法论；</li>
+<li>EP（专家并行）被明确排除在外——30B-A3B 这个规模/稀疏度下通信计算比已经能靠 FSDP+DP 摆平，模型更大更稀疏才需要 EP（呼应 abcdabcd987（二）极简并行方案中 EP 的角色）；</li>
+<li>局限：只验证了单一架构 + 4096 序列长度 + FSDP/DP；系统级和 kernel 级优化（35.3% MFU 的地基）不在本文范围内。</li>
+</ul>
+<hr />
+<p><em>注：本文是 Aleph Alpha 工程博客的精读提炼，非逐段翻译。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
