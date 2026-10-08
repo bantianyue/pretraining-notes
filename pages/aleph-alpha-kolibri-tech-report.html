@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《Kolibri 技术报告》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《Kolibri 技术报告》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://aleph-alpha.com/downloads/tech-report.pdf">https://aleph-alpha.com/downloads/tech-report.pdf</a></div>
+<h1>《Kolibri: A Sovereign European Model on the Pareto Frontier（Aleph Alpha 技术报告）》· 中文精读</h1>
+<blockquote>
+<p>原文：https://aleph-alpha.com/downloads/tech-report.pdf（英文，Aleph Alpha，189 页）
+精读日期：2026-10-08 ｜ 主题：训练核心 / MoE 架构 / 数据管线 / 训练基础设施 ｜ ⭐⭐⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>Aleph Alpha 全栈自研的英德双语 MoE 大模型 <strong>Kolibri</strong>：78.1B 总参数、每 token 只激活 3.46B（稀疏度 4.4%），24T token 三阶段训练，Apache 2.0 开源权重。报告覆盖架构消融、超参数迁移、数据管线、训练基础设施、后训练（SFT+RL）和 Model Factory，是"从零训一个 MoE 大模型"的完整实战手册。</p>
+<h2>1. 模型与训练规模</h2>
+<ul>
+<li><strong>架构</strong>：50 层 MoE，共享专家 + 路由专家 top-K；总参数 78.1B，激活 3.46B（4.4%）；</li>
+<li><strong>三阶段</strong>：预训练 20T token（16k 上下文，建立通用能力）→ 中期训练 3.4T（转向高质量推理/数学/代码/指令数据）→ 长上下文扩展 200B（到 256k 上下文；推理支持 1M）；</li>
+<li><strong>集群</strong>：768 张 B200，96 节点，SuperPOD 拓扑；节点内 NVLink Gen5（双向 1.8 TB/s），节点间每节点 8×ConnectX-7 IB（每卡跨节点双向 100 GB/s）。</li>
+</ul>
+<h2>2. 并行策略（训练基础设施）</h2>
+<ul>
+<li>预训练：<strong>EP_8 × FSDP_16 × DP_6</strong>——节点内 8 卡做专家并行（DeepEP v2），跨节点 FSDP 分片，dense 参数分片在 EP×FSDP=128 卡（一个完整副本），稀疏专家参数只分片在 FSDP=16 卡（每节点同位置 GPU）；</li>
+<li>中期训练和长上下文扩展：FSDP_128 × DP_6；</li>
+<li>软件：PyTorch 2.14 + FlashAttention 4（SWA 与全注意力都用），torch 编译的 kernel 在 trace 里验证通信被计算完全掩盖。</li>
+<li>与知识库的关联：这是 <strong>FSDP×EP×DP</strong> 在 MoE 上的真实组合实例——和上一篇 Aleph Alpha 博客（30B-A3B 的 FSDP×DP 分层放大）以及 abcdabcd987（二）的"FSDP×CP×EP 极简并行"形成对照：同一家公司在不同规模下选了不同的并行组合。</li>
+</ul>
+<h2>3. 架构关键决策</h2>
+<ul>
+<li><strong>混合注意力</strong>：每 5 层放 1 层全注意力（10 层），其余 40 层滑动窗口注意力（w=512，资源匹配消融选出）；全注意力块用 NoPE（无位置编码，长上下文更好），SWA 块用 RoPE（θ=10k）；QK 每头 RMS 归一化（训练稳定、RL 时 FP8 KV cache 不溢出）；</li>
+<li><strong>稀疏度消融</strong>：3.4B 激活参数下对比 42.1B/82.3B/122.6B 总参数——82.3B 全面优于 42.1B，122.6B 提升很小但 decode 慢、显存占位大（2 张 H100 上 256k 请求并发从 18 掉到 3）。最终定 ~80B；</li>
+<li><strong>MoE 负载均衡</strong>：EQB（Exact Quantile Balancing）管全局均衡 + LEI（Load-Error Injection）管局部均衡，<strong>无可调超参数</strong>；全局 MaxVio 平均 0.31（比 Kolibri Origin 的辅助 loss + bias 方案超参更少、更不敏感）。</li>
+</ul>
+<h2>4. 优化与超参数迁移</h2>
+<ul>
+<li><strong>WSM 学习率</strong>：Warmup-Stable-Merge——前 100B token 线性 warmup，之后全程恒定学习率，用 checkpoint 平均（最后 20 个、每 10B token 一个）代替 cooldown；</li>
+<li><strong>优化器分工</strong>：Muon（spectral 约定，LR 与宽度无关）管 attention/专家权重；Adam 管 embedding/norm；AdamW 管 LM head/路由；output 层零初始化让每层起步为恒等映射；</li>
+<li><strong>超参数迁移</strong>（不用全规模 sweep）：µP 跨宽度迁移（只缩放宽度、层数/专家数/top-k 不动，代理模型路由动态与生产一致）+ <strong>loss 外推</strong>跨 token horizon（用短 horizon 的 loss 轨迹预测 20T horizon 的最优 LR/batch，比 power-law 拟合更省）。</li>
+</ul>
+<h2>5. 数据管线（20T 训练 token 的来源）</h2>
+<ul>
+<li>数据池：78 个数据集、29.3T token → 实际用 20T；德语占 21.3%（德语与英语的过滤阈值分别调参，如德语长词不能用英语词长过滤）；</li>
+<li>自研 Common Crawl 管线：Resiliparse 抽取 → 精确去重 → MinHash 模糊去重（-25.9%）→ 子串去重（-21.3% 字节），308B 文档筛到 308B quality-scored 文档；</li>
+<li>德语三路：原生爬虫（0.8T）+ Mistral-Nemo 改写（1.1T，最大单一来源）+ 精选翻译（翻译保留源语言文化分布，只能做补充）；</li>
+<li>合成数据占 ~24%（4.8T，含改写/翻译）；质量标注：Qwen3-32B 做 20+ 维度 judge → 蒸馏成 fastText 分类器打分全量文档；</li>
+<li>PII 正则脱敏（超 15% 被脱敏的文档直接丢弃）。</li>
+</ul>
+<h2>6. 后训练与 Model Factory</h2>
+<ul>
+<li><strong>SFT</strong>：德英精选数据 + MergeMix 数据混合 + KulturBank（德语文化评测/数据）；</li>
+<li><strong>RL</strong>：120 万+ 内部任务（推理、工具使用、指令遵循、代码、检索），RL 基础设施与经验教训单独成章；</li>
+<li><strong>Savanna / Model Factory</strong>："模型训练即代码"（MTaC）——中央仓库、版本化 workflow 串起数据→实验→训练→评测→部署；每晚自动训一个小模型端到端回归，训练/评测代码库的依赖由自动化每天 bump。</li>
+</ul>
+<h2>7. 与知识库其他内容的关系</h2>
+<ul>
+<li>这是"<strong>训练核心流程</strong>"的端到端实例：架构消融 → 超参数迁移 → 数据三阶段 → 基础设施 → 后训练 → Model Factory，正好是学习目标达标标准里"训练的核心流程"的完整展开；</li>
+<li>与上一篇 Aleph Alpha 博客互补：博客讲"16 卡小规模搜索 → 512 卡放大"的方法论，这份报告讲"训一个 78B MoE 需要做的全部决策"；</li>
+<li>MoE 稀疏度消融（总参数 vs decode 吞吐的权衡）与 abcdabcd987（二）的 EP 讨论、MLSysBook 的专家并行章节直接相关——总参数决定权重搬运和显存占位，是 decode 成本的主导项。</li>
+</ul>
+<hr />
+<p><em>注：本笔记基于技术报告的目录 + 预训练/架构/数据/基础设施章节精读提炼，非逐段翻译。SFT/RL 细节可后续按需深入。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
