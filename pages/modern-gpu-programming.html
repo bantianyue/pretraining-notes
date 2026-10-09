@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《Modern GPU Programming for MLSys》 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《Modern GPU Programming for MLSys》</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://mlc.ai/modern-gpu-programming-for-mlsys/">https://mlc.ai/modern-gpu-programming-for-mlsys/</a></div>
+<h1>《Modern GPU Programming for MLSys》· 中文精读</h1>
+<blockquote>
+<p>原文：https://mlc.ai/modern-gpu-programming-for-mlsys/（英文，mlc.ai / CMU MLC 课程系列，开源）
+精读日期：2026-10-09 ｜ 主题：Kernel 优化 ｜ ⭐⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>mlc.ai 的另一本新书，是《Agentic GPU Programming for MLSys》（知识库 08 号）的<strong>姊妹篇</strong>：这边讲"人怎么写出高性能 GPU kernel"，那边讲"agent 怎么写"。目标硬件 <strong>NVIDIA Blackwell</strong>，全书用 <strong>TIRx</strong> Python DSL 写可运行、可验证的真实 kernel，核心理念：data layout、异步数据搬运、异步协调。</p>
+<h2>1. 全书结构</h2>
+<ul>
+<li><strong>Part I：Understanding the GPU</strong>——GPU 组织与执行模型、写 fast kernel 的通用技术、data layout、异步内存操作与协调。建立全书依赖的硬件直觉；</li>
+<li><strong>Part II：TIRx Overview</strong>——全书代码示例的底座 DSL；</li>
+<li><strong>Part III：GEMM: Tiled to SOTA</strong>——从朴素 tiled GEMM 一步步优化到 SOTA：TMA pipelining → persistent kernel + tile scheduler → warp specialization → 2-CTA cluster → multi-consumer warp specialization，最后端到端实测；</li>
+<li><strong>Part IV：FlashAttention 4</strong>——把 Part III 的技术全部用上：QKᵀ MMA 与 PV MMA、softmax 在线 rescaling、TMEM layout 复用、barrier 协议、pipeline timeline、causal masking、GQA 支持、tile scheduling；</li>
+<li><strong>Appendices</strong>：TIRx 语言参考、可复现的 GPU benchmark + profiling 工作流、编译器内部原理、异步 kernel 调试指南。</li>
+</ul>
+<h2>2. 关键技术线</h2>
+<ul>
+<li><strong>TMA（Tensor Memory Accelerator）pipelining</strong>：Blackwell 硬件异步搬运，软件流水线掩盖访存；</li>
+<li><strong>Warp specialization</strong>：生产者/消费者 warp 分工 + multi-consumer 变体，2-CTA cluster 协同；</li>
+<li><strong>Persistent scheduling</strong>：kernel 常驻、tile 调度器动态分发，解决尾部效应；</li>
+<li><strong>FlashAttention 4 完整实现</strong>：不是伪代码，是可编译验证的 kernel，含 GQA、因果掩码、TMEM 复用。</li>
+</ul>
+<h2>3. 与知识库其他内容的关系</h2>
+<ul>
+<li>与 08 号《Agentic GPU Programming》互补：08 号讲"agent 在 TIRx harness 下写 kernel"的方法论，这本讲"kernel 本身怎么写到 SOTA"——<strong>同一套 TIRx 底座</strong>，两本书合起来就是"人写 kernel 的技艺 + agent 写 kernel 的工程"；</li>
+<li>与 GEMM 章（07 号《How to make your models fast》）互补：07 号讲 naive→shared-memory tiled→register tiled 的经典优化阶梯（pre-Blackwell 时代），这本是 Blackwell 时代的续篇：TMA、warp specialization、cluster；</li>
+<li>与 Modular《Kernel Optimization》（05 号）互补：那边讲工具阶梯（cuBLAS/TVM/Triton/CUDA/Mojo），这边是 CMU 课程式的系统化教程。</li>
+</ul>
+<hr />
+<p><em>注：本笔记基于书的 landing 页 + 完整目录结构精读，是全书导览而非逐章翻译。各章深入时可再逐章精读。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
