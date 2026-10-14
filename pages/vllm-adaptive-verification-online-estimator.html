@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 自适应验证在线估计器 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM 自适应验证在线估计器 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vllm.ai/blog/2026-10-14-adaptive-verification-online-estimator">https://vllm.ai/blog/2026-10-14-adaptive-verification-online-estimator</a></div>
+<h1>vLLM 自适应验证：无置信度头时的在线接受率估计器 —— 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://vllm.ai/blog/2026-10-14-adaptive-verification-online-estimator">Adaptive Verification Without a Confidence Head</a>（vLLM 博客，2026-10-14）
+星级：⭐⭐⭐⭐ 重点阅读｜主题：推理优化、推测解码（speculative decoding）
+收藏日期：2026-10-15｜一句话：vLLM 给无置信度头的草稿模型补上自适应验证——逻辑回归从草稿 logits 提单个标量在线预测接受概率，K+1 个参数，AUC 0.83 追平训练好的置信度头。</p>
+</blockquote>
+<h2>1. 背景：自适应验证（AV）</h2>
+<p>推测解码中，AV 只验证草稿 token 的一个子集：接受概率低的在目标模型前向之前先从 batch 里剪掉，省算力。大 batch 下 GPU 计算受限时最划算。</p>
+<p>AV 需要逐 token 的接受概率估计，此前只有带置信度头的 DSpark 草稿模型能用。置信度头是草稿隐状态上每个位置的小线性层，训成"目标会不会接受这个 token"的二分类器。</p>
+<h2>2. 问题：EAGLE/MTP/DFlash 被排除在外</h2>
+<p>没有置信度头的草稿模型（EAGLE、MTP、DFlash、部分 DSpark checkpoint）完全用不上 AV。加头意味着重训，对存量 checkpoint 不是选项。</p>
+<h2>3. 方案：logit(qmax) 特征 + 在线逻辑回归</h2>
+<p>从草稿分布提单个标量——<strong>草稿最可能 token 的 log-odds</strong>，即 logit(qmax)，直觉上是草稿对自己预测的确信度。逐位置逻辑回归：共享斜率 ω + 逐位置截距 βi，K token 草稿模型共 <strong>K+1 个参数</strong>。sigmoid 输出即估计接受率，直接用作 AV 置信度分数。</p>
+<p>参数<strong>在线拟合</strong>：用目标模型正常验证本来就要产生的接受/拒绝判定做标签（只取到第一次拒绝为止的 token），IRLS 最小化对数似然损失。每 N 个 decode 步重拟合一次，区间内累积 Hessian/梯度，内存上界 <strong>O(K²)</strong>（而非收原始标签的 O(N×B×K)）。</p>
+<p>两个工程细节：
+- <strong>共享斜率</strong>：深层位置标签稀疏，共享防止 noisy 更新；实测只差 0.0002 AUC / 0.0003 log-loss。
+- <strong>步长阻尼</strong>：更新按 n/(n+常数) 缩放，标签少的深层走得保守。</p>
+<h2>4. 为什么是 logit(qmax)：四个维度的取舍</h2>
+<p>评估轴：无损性（硬门槛，不能打破推测解码输出目标精确分布的保证）、AUC（区分度）、log-loss（罚自信的错）、ECE（校准）。</p>
+<ul>
+<li>logit(qsampled) / -log(-log(qsampled))：AUC 更高（0.855），但<strong>有损</strong>——按 qsampled 剪枝让"验不验"依赖于 xi 本身，活下来的草稿不再服从 q 分布，拒绝采样的 min(1,p/q) 前提被破坏。</li>
+<li>qmax 直接当概率（EAGLE-2 做法）：AUC 0.8259 甚至超过置信度头（0.8191），但校准极差（平均预测 0.784 vs 实际 0.723，ECE 差 7 倍）。草稿的确信 ≠ 目标认不认，还受采样配置和负载影响。</li>
+<li>logit(qmax)：AUC 0.8336 / ECE 0.0100，平衡最好，且与被估计量同处 log-odds 尺度。</li>
+</ul>
+<p><strong>AV 要的不只是排序</strong>：预算决策把预测接受概率加总再除以实测成本，依赖的是<strong>校准</strong>——这是在线拟合相对离线映射的核心优势。</p>
+<h2>5. 对阵置信度头：赢在修剪发生的位置</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>AUC</th>
+<th>log-loss</th>
+<th>ECE</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>估计器</td>
+<td>0.8336</td>
+<td>0.4284</td>
+<td>0.0100</td>
+</tr>
+<tr>
+<td>置信度头</td>
+<td>0.8191</td>
+<td>0.4449</td>
+<td>0.0052</td>
+</tr>
+</tbody>
+</table>
+<p>去掉第 0 个草稿位置后：估计器 AUC 0.8352 vs 头 0.8075，ECE 基本打平（0.0103 vs 0.0090）。逐位置分解：头只在第 0 位领先，估计器从第 1 位起反超，到最后一位领先 <strong>0.08 AUC</strong>；两者都在第 5 位后下滑（DSpark block size=5，没训过更深）。</p>
+<p>关键洞察：survival 是连乘，第 0 位永远是单请求最高分、最不容易被预算裁掉——<strong>估计器的优势正好长在修剪发生的位置</strong>，所以端到端能追平置信度头。</p>
+<h2>6. 斜率与截距的分工</h2>
+<p>固定模型对换负载：斜率几乎不动（0.51–0.55，与草稿熵 r=-0.08）；截距随负载动（第 0 位截距与草稿熵 r=-0.89）。换模型对：斜率 0.45–0.59，每对内部稳定。</p>
+<p>分工：<strong>斜率衡量草稿模型"知不知道自己对了"</strong>（模型对+采样方式的属性）；<strong>截距吸收基础接受率</strong>（随深度下降、难内容更低，同时依赖模型对和负载）。</p>
+<h2>7. 实测与局限</h2>
+<p>三个此前用不上 AV 的 checkpoint（MiMo-V2.5-Pro-FP4+DFlash、Inkling-NVFP4+MTP、Muse-Glimmer-30B+DFlash2）：7 个并发中有 5 个，AV 落在吞吐-交互性前沿上。</p>
+<p>局限：目标注意力后端须支持变长验证；MTP/EAGLE 收益小于 DFlash/DSpark（自回归推测器为可能被剪的 token 付的起草成本占比更大）。</p>
+<p>使用：<code>--speculative-config</code> 加 <code>"enable_adaptive_verification": true</code>，满足"无置信度头+变长注意力"时自动选用在线估计器。</p>
+<h2>关联阅读</h2>
+<ul>
+<li>公众号已发：《vLLM自适应验证：K+1个参数在线拟合，AUC 0.83追平置信度头》（2026-10-15，draft.id=TIqnnVEu6Oy3-wtKttGa0cJ_V7CLP01aBuOPR8hbOAqoESHshWMkO5aaw-3yd996）</li>
+<li>vLLM 官方文档：推测解码 / 自适应验证</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
