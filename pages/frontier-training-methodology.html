@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>前沿模型训练方法论 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>前沿模型训练方法论</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://djdumpling.github.io/2026/01/31/frontier_training.html">https://djdumpling.github.io/2026/01/31/frontier_training.html</a></div>
+<h1>《Frontier Model Training Methodologies》· 中文精读</h1>
+<blockquote>
+<p>原文：https://djdumpling.github.io/2026/01/31/frontier_training.html（Alex Wa 博客，2026-01-31）
+精读日期：2026-10-14 ｜ 归属学习目标：掌握大模型预训练技术（训练核心流程全景）
+星级：⭐⭐⭐⭐⭐ ｜ 主题：训练核心流程、架构选型、稳定性、优化器、数据、后训练、训练运维</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>七个开源前沿模型（SmolLM3 3B、Intellect-3 106B-MoE、Hermes 4、gpt-oss-120b 117B、Kimi K2 1.06T、DeepSeek-R1、Trinity Large 400B）的训练报告压成的一套<strong>最小训练手册</strong>：前沿训练是系统问题——<strong>数据配比、架构和稳定性选择，压倒大多数算法微调</strong>。从强基线出发，快速可靠地消融，去风险，一次只改一个变量。</p>
+<h2>1. 架构选型：决策树</h2>
+<p>选架构先看约束，不看时髦：</p>
+<ul>
+<li><strong>内存/infra 受限、刚上手 LLM 训练、时间紧</strong> → 稠密架构。</li>
+<li><strong>要推理效率且管得住路由复杂度</strong> → MoE + 严格负载均衡。</li>
+<li><strong>长上下文是核心需求</strong> → 文档掩码 + RoPE 缩放（ABF/YaRN）或 RNoPE 变体。</li>
+<li><strong>要简单内核快速迭代</strong> → 别碰新奇注意力变体，除非能干净消融。</li>
+</ul>
+<p>注意力机制的取舍链：MHA（KV 缓存大，推理瓶颈）→ MQA（全头共享 KV，省内存但漏注意力容量）→ <strong>GQA 小分组（2/4/8）</strong>（HF 消融：在 HellaSwag/MMLU/ARC 上打败 MHA；MHA 又打败 MQA 和 16 分组 GQA）→ MLA（压缩隐变量，4–8 倍 KV 压缩，KV 参数量接近 GQA、性能强过 MQA，但实现复杂）。</p>
+<p><strong>门控注意力</strong>：在 SDPA 输出后加逐元素门控 g_t=σ(W^G x_t)，压住 attention sink 和大激活，<strong>稳定训练、减少 loss 尖峰</strong>，对大训练价值极高。</p>
+<p><strong>MoE 三要素</strong>：(1) 稀疏度越高越好（100+ 专家、每 token 激活约 10 个是新常态）；粒度 G=2·d_model/d_expert 不怎么改 loss，但驱动效率杠杆；(2) 共享专家常开（一个通常够）吸收高频模式；(3) <strong>负载均衡是命门</strong>——辅助损失 LBL（αΣf_iP_i）、DeepSeek-V3 无损偏置均衡、序列级 SMEBU，<strong>必须用全局统计监控，局部 batch 统计会带偏路由</strong>。</p>
+<h2>2. 长上下文：文档掩码 + 位置编码缩放</h2>
+<p><strong>文档内掩码（intra-document masking）</strong>：packing 把多文档拼进固定序列时，普通因果掩码让 B 的 token 看到不相关的 A。改 mask 让 token 只看同一文档内的前序 token。HF 实测：短任务基本无感（PIQA 小提升），但 <strong>4k→64k 扩展时变得关键</strong>。</p>
+<p><strong>RoPE 缩放</strong>：θ=position×1/base^(k/(dim/2)) 随长度膨胀。ABF（增大 base）和 YaRN（分频段精细插值 + 动态注意力缩放 + 温度调整）修；极长上下文 YaRN 最好（gpt-oss-120b 用它把稠密层扩到 131k）。<strong>RNoPE</strong>（RoPE/NoPE 层交替，RoPE 管局部、NoPE 管长程检索）+ 文档掩码是 HF 的选择：短任务性能相当，给长上下文打地基。</p>
+<p>注意力模式降算力：分块注意力、滑动窗口（SWA，Gemma 3 隔层配全注意力）、DCA（Qwen-2.5 做到 1M 上下文）、局部/全局层交替（不稳时加密全局层，loss 恢复更快）。</p>
+<p>SmolLM3 的拉长路线：4k→32k→64k→128k <strong>逐级拉</strong>（RoPE ABF，base 2M/5M；base 10M 长任务好但伤 GSM8k；128k 用 YARN 从 64k checkpoint 起——<strong>离目标长度越近训越好</strong>）。</p>
+<h2>3. 稳定性：护栏重于奇技</h2>
+<ul>
+<li><strong>logit softcapping（Gemma 做法）是首选</strong>：tanh 平滑压缩（Gemma 2 注意力层 soft_cap=50、LM head=30）。注意它和 Flash Attention/SDPA <strong>训练不兼容</strong>（fused kernel 假设标准注意力），微调要用 eager；推理可换回。</li>
+<li>z-loss（λ·log²Z）：HF 在 1B 上发现白加开销，不用。</li>
+<li><strong>QK-norm 伤长上下文</strong>：归一化抹掉点积幅度，相关 token 被弱化——别当成"永远好"。</li>
+<li>RMSNorm ≈ LayerNorm 性能但更便宜；<strong>深度缩放三明治 norm</strong>（前后都 norm，增益按层深缩放）+ LM head 前 RMSNorm，给深网更多稳定性。</li>
+<li>初始化：截断正态（±2–3σ）或 μP；嵌入前向缩放到 √d 量级。<strong>embedding 不加 weight decay</strong> 更稳（weight decay 压 embedding 范数 → LayerNorm 的 1/σ 项放大浅层梯度）。</li>
+</ul>
+<h2>4. 优化器与超参数</h2>
+<ul>
+<li><strong>AdamW 十年还是默认</strong>：β1=0.9、β2=0.95、wd 0.1/0.01。</li>
+<li><strong>Muon</strong>：矩阵级更新，Newton-Schulz 逼近矩阵 sign 函数，大 batch 下比 AdamW 更样本高效。Trinity Large 用混合：隐藏层 Muon + 嵌入/输出层 AdamW。infra 代价：要完整梯度张量，Prime 用 all-to-all 批量置换。</li>
+<li><strong>MuonClip（Kimi K2）</strong>：监控每头 max logit，超阈值 τ 按 γ=min(1,τ/S_max) 缩放 W_q/W_k，防注意力 logit 爆炸。</li>
+<li>学习率：warmup → 退火。<strong>WSD</strong>（最后 10–20% 线性衰减）对消融友好——只重训尾部。HF 定 <strong>2e-4</strong>；Kimi K2：10T 用 2e-4（500 步 warmup）+ 5.5T 从 2e-4 余弦衰到 2e-5。</li>
+<li><strong>batch 放大 k 倍 → 学习率按 √k 缩放</strong>；临界 batch 随训练增大 → batch warmup。</li>
+<li>缩放定律 C≈6ND 只给方向：<strong>实验室普遍 overtrain</strong>（Qwen3 训 36T；"算力最优"不管推理成本）。Kimi K2：稀疏度 48（384 专家激活 8 个）大赚；注意力头 128→64，验证 loss 只掉 0.5–1.2%，<strong>推理 FLOPs 降 45%</strong>。</li>
+</ul>
+<h2>5. 数据：配比压倒架构微调</h2>
+<ul>
+<li><strong>多阶段训练</strong>：LM 最终行为重度取决于最后看到的数据，<strong>好数据往后放</strong>；benchmark 一 plateau 就是注入信号。架构消融在小模型做，<strong>数据配比消融要在大尺度做</strong>。</li>
+<li>SmolLM3：阶段一 75/12/10/3（英文网/多语言网/代码/数学）；新阶段 40/60（基线/新数据）；三阶段 8T@4k + 2T@4k 高质量注入 + 1.1T@4k 推理/Q&amp;A。</li>
+<li><strong>token 效用</strong>：高质量数据最大化利用又防过拟合。Kimi K2 数据复述（知识域换风格复述、数学域改学习笔记风+翻译），每语料最多复述两次。</li>
+<li><strong>中期训练</strong>：SFT 暴露领域短板后再决定补；只想要风格/对话，算力花在后训练更值。<strong>蒸馏式中期训练</strong>（Phi-4-Mini-Reasoning 蒸 DeepSeek-R1）：AIM24 涨 3 倍、MATH-500 +11 分。</li>
+</ul>
+<h2>6. 后训练：SFT 打底，RL/蒸馏看可验证奖励</h2>
+<ul>
+<li><strong>SFT 学习率比预训练小一个量级</strong>（SmolLM3 3e-6/1e-5）；开 packing 再降；多训 1–2 epoch 常涨几个点（LiveCodeBench v4 epoch2→3 近乎翻倍）；<strong>只算 assistant token 的 loss</strong>。</li>
+<li><strong>序列打包</strong>：best-fit/first-fit decreasing，batch 效率 &gt;99.9%；但固定 token 预算下数据多=更新少，<strong>小数据集伤 eval</strong>（有效 batch 128 时 IFEval 掉 10%）。</li>
+<li>偏好优化：SFT 的 1/20 学习率（SmolLM3 1e-6）、β~0.1、数据量 2k–340k 稳定；APO-zero 域外最好。</li>
+<li><strong>RLVR</strong>（DeepSeek-R1 带火）：verifier 给奖励，信号稳、可扩展。<strong>GRPO 实践中常轻微 off-policy</strong>（多 rollout batch 顺序更新 → in-flight 更新），用重要性采样裁剪（IcePop α=0.5, β=5）缓解。</li>
+<li><strong>R1-Zero</strong>：纯 RL 无 SFT 冷启动（GRPO 10.4k 步，lr 3e-6，KL 0.001），训出反思（"wait"/"mistake" 词频涨 5–7 倍，8k 步后突现）。<strong>蒸馏 R1 到 Qwen-32B，比大规模 RL 更划算</strong>。</li>
+<li>失败的方法论同样重要：MCTS（搜索空间指数大，卡局部最优）、过程奖励模型（难定义步骤、被 hack）都试过不行。</li>
+</ul>
+<h2>7. 训练运维：高频故障点</h2>
+<ul>
+<li><strong>吞吐消失先查数据管线</strong>：SmolLM3 开跑几小时吞吐掉 40%——网络存储 keep-hot 缓存逐出 24TB 数据集冷分片；nanotron dataloader 查找表无限增长致缺页（换 Tokenizedbytes）；顺序读不 shuffle → batch 代表性崩（离线重洗解决）。</li>
+<li><strong>TP 种子</strong>：两 rank 同种子初始化 → 激活/梯度同质化，收敛差。<strong>种子是高杠杆细节，开跑前验证</strong>。</li>
+<li>常见嫌疑犯：学习率过高、坏数据、数据-参数状态组合尖峰、初始化差、<strong>别用 fp16</strong>。OLMo2 去掉 32+ 次重复 n-gram 文档大减尖峰。</li>
+<li>eval 巨耗时（约 20% 算力），自动化和日志（吞吐、loss、梯度范数、节点健康）是一等公民。</li>
+</ul>
+<h2>8. 与学习目标的连接</h2>
+<ul>
+<li><strong>并行策略</strong>：MoE 的 EP 需求（负载均衡、all-to-all）、TP 种子问题、Prime 多客户端编排器——与"数据/张量/流水线并行如何组合"直接相关。</li>
+<li><strong>训练核心流程</strong>：多阶段数据配比、中期训练、SFT→偏好→RL 的完整链条，是"训练核心流程"的端到端实例。</li>
+<li><strong>稳定性工程</strong>：softcapping、MuonClip、初始化/norm 细节——把"训练为什么会崩"变成了可操作的 checklist。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
