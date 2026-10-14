@@ -158,6 +158,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">Kernel 优化</span><span class="tag">训练/推理一致性</span><span>收藏于 2026-10-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">14</span>Anthropic Prompt Caching：缓存命中只付 0.1 倍价</h3>
+  <p>aiengg.dev 实战讲解：提示缓存把已处理的前缀存下来跨请求复用，命中只付 0.1 倍输入价；复用要求前缀逐字一致（工具→系统→消息固定顺序），任一改动让之后全部重算。布局铁律：静态置顶、参数垫底——填空式写法让前缀提前结束，大部分内容白付全价。写入收 1.25 倍价、5 分钟窗口且命中刷新；缓存模型专属，10 万 token 上下文切模型反而更贵。本质是 KV cache 跨请求复用的 API 层产品化。</p>
+  <div class="links">
+    <a class="cn" href="pages/prompt-caching-anthropic.html">中文精读 →</a>
+    <a class="en" href="https://aiengg.dev/blog/what-is-prompt-caching-in-llms">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span class="tag">API 成本</span><span>收藏于 2026-10-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
