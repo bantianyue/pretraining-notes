@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HINT4：无FP4的GPU上跑硬件无关NVFP4 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>HINT4：无FP4的GPU上跑硬件无关NVFP4</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://secemp.blog/2026/10/13/hardware-invariant-nvfp4-progress-report-1/">https://secemp.blog/2026/10/13/hardware-invariant-nvfp4-progress-report-1/</a></div>
+<h1>HINT4：无 FP4 的 GPU 上跑硬件无关 NVFP4 —— 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://secemp.blog/2026/10/13/hardware-invariant-nvfp4-progress-report-1/">Towards a hardware-invariant NVFP4 for GPUs without FP4: progress report 1</a>（secemp 博客，2026-10-13，个人作者在 Prime Intellect RL Residency 期间的工程报告）
+星级：⭐⭐⭐⭐ 重点阅读｜主题：低精度量化（训练/推理）、GPU Kernel、跨代硬件兼容
+收藏日期：2026-10-14｜一句话：NVFP4 是 Blackwell 原生 4-bit 格式，作者用 INT8 tensor core 在 Ampere 上复刻它——权重保持 4-bit、一套源码从 sm_80 编到 sm_120，Kimi-Linear 48B 上精度赢 NVFP4，3090 解码约 2 倍 FP16。</p>
+</blockquote>
+<h2>1. 背景：NVFP4 是什么，为什么要在 3090 上跑</h2>
+<p>NVFP4 是 NVIDIA 的 4-bit 浮点格式：每权重 E2M1（2 指数位 + 1 尾数位，最大存 6），每 16 个权重共享一个 8-bit E4M3 scale，整个张量再顶一个 FP32 scale，合计 <strong>4.5 bits/weight</strong>。Blackwell 的 tensor core 原生跑它。</p>
+<p>Ampere（3090）没有原生 FP4：mma 的 FP4 形态要 sm_120a（消费级 Blackwell）；数据中心 Blackwell 走另一套指令族；更老的架构根本没有。NVFP4 checkpoint 在 Ampere 上能跑 weight-only（NVFP4A16）：kernel 把 4-bit 权重解包成寄存器里的 16-bit 浮点，用半精度 tensor core 做乘法——权重在内存里小，但每次乘法前都要先解码。</p>
+<p><strong>HINT4</strong> 是作者的落点：权重保持 4-bit，数学走 <strong>8-bit 整数 tensor core</strong>——因为那是 Ampere 到 Blackwell 每代 NVIDIA GPU 都原生支持的<strong>唯一</strong> tensor core 指令。</p>
+<h2>2. 核心洞察：Hopper 无声吃掉了 4-bit 指令</h2>
+<ul>
+<li>PTX 里 4-bit 和 8-bit 的整数 mma 都是 sm_80 起合法。Ampere 上 SASS 显示真 4-bit 指令，作者一度宣称"原生 INT4"。</li>
+<li>把同一个 kernel 编到 sm_90 再看 SASS：<code>mma.m16n8k32.s4</code> → <code>IMMA.16832.S4.S4 ×1</code>；而在 sm_90 上变成了 <code>IMMA.16816.S8.S8 ×2</code>。<strong>Hopper 没有 4-bit 指令</strong>，ptxas 把每条 4-bit 拆成两条 8-bit（各覆盖一半 K 维度），前面加移位和 LOP3 做符号扩展。还在 tensor core 上跑、答案也对，但多出来的活吃吞吐。</li>
+<li>NVIDIA 的 tensor core 输入类型表确认：INT4 到计算能力 8.9 为止，Hopper 起消失；INT8 每一行都在，Blackwell 全系包括。</li>
+<li>PTX ISA 9.3 通读结论：Hopper 的 wgmma 要 8-bit 整数和 1-bit 模式（无 4-bit）；Blackwell tcgen05 只有 i8（还只列 sm_100a/sm_110a）；消费级 Blackwell 的新 mma 全是浮点（含 FP4）。<strong>没有任何 4-bit（整数或 FP4）能以一条原生指令从 Ampere 跑到 Blackwell。</strong></li>
+<li>于是全部改建在 <code>mma.sync.aligned.m16n8k32</code> 有符号字节上——sm_80 到 sm_120 每个目标都原生。权重内存里保持 4-bit，乘法前在寄存器里拓成有符号字节。</li>
+</ul>
+<p><strong>Hardware-invariant 的含义</strong>：每个 kernel 在每代 GPU 上编译出同一条原生指令，不要 <code>if ampere / elif ada / elif hopper</code>，也不要每代一份手抄副本。</p>
+<h2>3. 8-bit 数学的代价</h2>
+<ul>
+<li>8-bit mma 要求两个操作数都是 INT8：<strong>激活每次调用都要现场量化成 INT8、自带 scale</strong>（NVFP4A16 没这步），多一个舍入误差入口。乘积累加进 INT32，权重和激活的 scale 作用在整数和上。</li>
+<li>逐 token 生成时激活矩阵只有一行（M=1），mma tile 要 16 行，15 行是 padding。<strong>小 M 走 DP4A</strong>——普通 CUDA core 上的四路字节点积，batch-one 路径根本不用 tensor core。</li>
+<li>块 scale 是 E4M3；cvt 指令转 E4M3 要 sm_89 起。3090 上编译器内联软件解码，<strong>每 scale 字节约 40 条指令</strong>，Ada 上一条搞定。老 kernel 把解码放在 K 主循环里（最贵的位置）；后来把解码搬出 kernel：scale 推理前解码一次，prepared kernel 永不碰 FP8 字节。</li>
+</ul>
+<h2>4. 精度：Kimi-Linear 48B 实验</h2>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>WikiText-2 PPL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BF16</td>
+<td>6.41</td>
+</tr>
+<tr>
+<td>HINT4 plain INT4</td>
+<td><strong>6.54</strong></td>
+</tr>
+<tr>
+<td>NVFP4（精确数学）</td>
+<td>6.63</td>
+</tr>
+<tr>
+<td>NVFP4（vLLM Marlin 快 kernel）</td>
+<td>6.71</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>plain INT4 已经赢了 NVFP4，不用旋转。NVINT4 论文（Chen et al.，E2M1 网格换对称 INT4）：12 个模型上全输，加 Hadamard 旋转后全赢。但那篇的硬件部分是没人造过的乘法器的门级模型，且作者只有一张 3090。</li>
+<li><strong>旋转在这里反而更差</strong>：Kimi 的 MoE 权重峰度大多在 3–3.7（高斯是 3），没尾可展。合成张量仿真：Hadamard 旋转在重尾张量上值 3dB+ SNR、纯高斯上零作用。旋转后重构 SNR 差几百分贝，PPL 和 KL 反而更差——猜测误差被搬到了模型更敏感的地方。</li>
+<li>GPTQ 补了约三分之一到 BF16 的 gap（128 条 2048-token 校准序列，8×H100 上 2 小时+）。9 月作者全拆了 GPTQ/AWQ/旋转——目标改成<strong>只吃 checkpoint</strong>，不要校准数据、不改网络本身。</li>
+<li>打包器改进：absmax 不是最优 scale，试一串候选留平方误差最小的；E4M3 舍入往下会 clip 块内最大权重，编码器这时往上舍。</li>
+</ul>
+<h2>5. Dual Grid 与 TL 两级量化</h2>
+<ul>
+<li><strong>Dual grid</strong>：有些块适合等距 INT4 网格，有些适合 FP4 的不等距网格——不用二选一。E2M1 幅度翻倍得 0,1,2,3,4,6,8,12，全是整数：NVFP4 式 FP4 块可以走同一条 INT8 mma，零额外误差，只是 nibble 拓宽时查表不同。E4M3 scale 恒正，符号位空着，用它标记每块来自哪个网格。Llama-3.2-1B 某张量上 FP4 网格赢约 40% 的块。</li>
+<li><strong>BBH 逻辑推理缺口定位</strong>：2 万+ 量化张量对 BF16，除 9 个外全赢 NVFP4——那坏的是哪？逐组把 BF16 权重换回去：attention 权重全换回几乎补回 five-object 变体的全部 gap，只换 output projection 就补回大半。把这个投影存成有符号字节 <strong>W8</strong>，gap 合上。<strong>教训：重构误差 ≠ 下游任务表现，敏感模块要单独处理。</strong></li>
+<li><strong>TL（two-level）</strong>：组越小误差越低（NVFP4 用 16 的原因），但 8-bit mma 沿 K 一次走 32 个权重，16 的组意味着每次乘法劈两半。两组 16 权重共享一个 E4M3 scale，每组再配 1–8 的小整数乘子，折进权重字节再乘（4-bit×8 仍进有符号字节，数学精确），一次 mma 覆盖两组，4.5 bits/weight 不变。乘子 0 留给 FP4 块标记，dual grid 在 TL 里继续工作。</li>
+<li><strong>TL-DQ</strong>：名字像 double quantization 但不是——它是最终 TL scale 词的字典，展开逐字节还原精确 TL scale 流，<strong>零新增误差</strong>。Kimi 上和 TL 精度完全一致，checkpoint 小约 1GB。</li>
+</ul>
+<h2>6. 速度：3090 实测</h2>
+<ul>
+<li>144 个孤立矩阵乘（三层形状 × 六个 M × 八种方法）：M=1（解码）TL-DQ 三形状全约 <strong>2 倍于 FP16</strong>；M=8 全形状慢于 FP16；32–512 看形状；1024 基本打平。M=8 为什么全慢？还没想通：猜测 batch-one 等内存，省四分之三权重字节就赚；再往上 3090 的 FP16 是强基线，kernel 还要解包权重+量化激活。</li>
+<li><strong>Prepared DQ</strong>：经典 DQ 的 raw kernel 每次调用都从调色板+二级 scale 重建 scale；prepared 在加载时做一次，解码好的 scale 以 plain FP32 存在打包权重旁。同二进制同输入，prefill 快 <strong>6–13 倍</strong>（54 个模型尺寸 case），输出逐 bit 一致。代价是显存：组 16 时 6 bits/weight、32 时 5、64 时 4.5。</li>
+<li>Host 侧优化：自带 prepared 权重的 handle、warm DQ 调用分发更快、小 MoE batch 路由减负、量化激活独立缓冲——warm 调用启动时间降 30–55%，CUDA graph 内 GPU 时间动 ±3% 以内。</li>
+</ul>
+<h2>7. Census：不信源码，信 SASS</h2>
+<p>Hopper 无声吃掉 4-bit MMA 之后，构建加 <strong>census</strong>：反汇编 sm_80/86/89/90/100/120 的每个 kernel 看 SASS。</p>
+<ul>
+<li>HMMA（半精度 tensor core 指令）不许出现（防回退到 FP16 数学）；</li>
+<li>4-bit 和稀疏 MMA 不许出现；</li>
+<li>每条 MMA 必须和 PTX 里写的一致（操作数类型、形状）。</li>
+<li>一个 helper 的几行会编进六个目标的一堆 kernel，census 也照出改动超界。batch-one kernel 的舍入修复（127·v/s 取整，.5 中点用 round-to-nearest-even 判据 <code>2·|v|==s → 64</code>）：CPU 验过所有 FP16 输入，GPU 对打近百万次零 mismatch；census 里每目标正好变 4 个 kernel，其余逐指令一致（含控制位）。</li>
+<li><strong>跨卡输出一致</strong>：激活舍入已精确，dense kernel 调度钉死一个和 3090 一致的 profile（SM 多的卡不能另选 K 切分或 reduction 顺序），MoE 输出固定顺序累加。SiLU 还用硬件近似指数，所以整模型跨卡 bit 一致承诺不了。</li>
+<li>census + 并排计时搭好后，被拒的改动：98 个 GPU 计时里 58 个更慢的、动了不该动的编译产物的（W8 中点 helper 改了 Blackwell 上 66 个 kernel，计时前就拒了）。</li>
+</ul>
+<h2>8. 评测方法论（值得借鉴）</h2>
+<ul>
+<li>整模型跑在共享的 3090 上：gpumutex 排队（fork 版：限时放弃+启动前检查锁文件）+ evaluator 自己的 GPU lease。</li>
+<li>每个任务固定请求跑<strong>两遍</strong>（两轮独立监督），两遍一致才存 shard；打分后在 CPU 上重放 scorer；worker 挂了从最后一个完整 shard 接。</li>
+<li>跑飞的教训：重启越跑越慢（单超时下启动事项太多→拆成独立步骤各设限）；systemd 清掉旧 cgroup 后 finish check 分不清活/死进程；MMLU 一道题 KV cache 块不够（8B BF16 四路请求要 672 块，只有 575）→ runner 限并发（3 路要 504 块），engine 排空后恢复。</li>
+<li>"Everything measured in this post comes from a saved result file"——作者此前两次数字翻车（旧结果当新测发、文档指令数与二进制漂移），现在只认存档结果文件。</li>
+</ul>
+<h2>9. 现状与开放问题（截至 2026-10-05）</h2>
+<ul>
+<li>计划 17 个配置（3×Llama-3.1-8B-Instruct + 14×Llama-3.2-1B-Instruct）；1B TL-DQ 两遍全 shard 跑完，8B BF16 约 40%，CPU 打分刚收 1 个 shard。</li>
+<li>DQ 目前只能走纯 HF Transformers 整模型评（vLLM 还加载不了）；Kimi 塞不进 24GiB，不在同卡对比里。</li>
+<li>开放问题：① datacenter Blackwell 的 8-bit mma.sync 够快吗（快路径是 tcgen05，sm_103a 甚至没列 .kind::i8）——Blackwell 上还没跑过；② sm_80–89 值得为原生 INT4 破一次 kernel 规则吗（得带 4-bit 激活）；③ PTX 9.3 的 mma_throughput pragma 对这些 kernel 有用吗。</li>
+<li>repo 在 report 2 前保持私有，之后开源+论文。</li>
+</ul>
+<h2>10. 与用户目标的连接</h2>
+<ul>
+<li><strong>训练/推理一致性</strong>：NVFP4 是训练和推理统一低精度格式的代表（Blackwell FP4 训练）；HINT4 展示了"同一份量化权重跑遍所有卡"的工程路径——格式设计时就要考虑跨代指令可用性。</li>
+<li><strong>Kernel 实战</strong>："不信源码信 SASS"的 census 方法论可直接借鉴；DP4A 处理小 M、prepared scale 思想（把重复解码搬出热路径）是通用优化模式。</li>
+<li><strong>量化直觉</strong>：旋转只在有尾分布上有效（峰度判据）；重构误差和下游任务可能脱钩，敏感模块（attention o_proj）值得单独高精度处理；dual grid 说明"网格选择可以逐块做、用空闲 bit 位标记"。</li>
+<li><strong>评测纪律</strong>：两遍一致才存、只认存档结果文件、census+并排计时双门禁——适合作为自己 GPU 验证任务的设计参考。</li>
+</ul>
+<hr />
+<p><em>精读完成于 2026-10-14。原文 26k 字符、20 图、1 表、1 代码块；公众号推送版本见《HINT4：无FP4的GPU上跑硬件无关NVFP4，3090解码快2倍》（draft.id=TIqnnVEu6Oy3-wtKttGa0ds6XSuBSN_8s69cKLhH1Sa9xsM4IuNi9jHKsON2ckUk）。</em></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
