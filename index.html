@@ -148,6 +148,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">Tensor Core</span><span>收藏于 2026-10-09</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">13</span>HINT4：无 FP4 的 GPU 上跑硬件无关 NVFP4</h3>
+  <p>secemp 实战报告：NVFP4 是 Blackwell 原生 4-bit 格式，作者用 INT8 tensor core 在 Ampere 上复刻它——Hopper 无声吃掉 4-bit mma（拆成两条 8-bit +LOP3），INT8 是每代都有的唯一指令，一套源码 sm_80→sm_120。Kimi-Linear 48B 上 plain INT4 精度赢 NVFP4（6.54 vs 6.63）；dual grid（FP4 网格赢 40% 块）+ TL 两级量化（4.5 bits/weight）+ W8 输出投影补 BBH 缺口；3090 解码约 2 倍 FP16；"不信源码信 SASS"的 census 方法论。</p>
+  <div class="links">
+    <a class="cn" href="pages/hint4-hardware-invariant-nvfp4.html">中文精读 →</a>
+    <a class="en" href="https://secemp.blog/2026/10/13/hardware-invariant-nvfp4-progress-report-1/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">Kernel 优化</span><span class="tag">训练/推理一致性</span><span>收藏于 2026-10-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
