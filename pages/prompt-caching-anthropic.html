@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anthropic Prompt Caching 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Anthropic Prompt Caching 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://aiengg.dev/blog/what-is-prompt-caching-in-llms">https://aiengg.dev/blog/what-is-prompt-caching-in-llms</a></div>
+<h1>Anthropic Prompt Caching：缓存命中只付 0.1 倍 token 价 —— 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://aiengg.dev/blog/what-is-prompt-caching-in-llms">What is Prompt Caching in LLMs?</a>（aiengg.dev，Gaurav Sen，2026-10-13）
+星级：⭐⭐⭐⭐ 重点阅读｜主题：推理优化、KV Cache、API 成本
+收藏日期：2026-10-14｜一句话：Anthropic 的提示缓存把已处理过的前缀存下来复用，命中只付 0.1 倍价；能不能命中全看提示布局——静态置顶、参数垫底，前缀逐字一致才能复用。</p>
+</blockquote>
+<h2>1. 问题：重复的提示，每次都在全价重算</h2>
+<p>调用大模型的 API 时，提示里的大部分内容和上一次一模一样：工具定义、系统指令很少变，用户的问题也常常只是换了几个空。但模型每次都要把整个提示重新读一遍，每一个 token 都要付费。</p>
+<p>根源在自注意力：语言模型用自注意力读提示，把序列中不同位置两两关联。单层自注意力的代价是 O(n²·d)（n 为序列长度，d 为 token 表示维度），长度翻一倍，该层做四倍的功。重复读 = 重复付平方级代价。</p>
+<h2>2. 机制：前缀匹配，逐字一致</h2>
+<p>Anthropic 的解法是提示缓存（prompt caching）：API 把之前调用中处理过的内容保留，只完整处理新增部分。对从缓存读到的输入 token，按 <strong>0.1 倍</strong>基准输入价计费。</p>
+<p>复用只有一个条件：<strong>前缀匹配</strong>。API 把每次请求开头的一段（prefix）与最近处理过的内容比对，要求<strong>逐字一致</strong>——前缀里任何一处改动，都会让它之后的内容全部重算。Anthropic 按固定顺序组装前缀：<strong>工具 → 系统 → 消息</strong>。工具定义和系统指令天然稳定，所以能对上。</p>
+<h2>3. 布局：静态置顶，参数垫底</h2>
+<p>能不能命中，取决于提示怎么写：</p>
+<ul>
+<li><strong>填空式（string replace）</strong>：答案写进正文中间的空里。第一个答案（邮箱）紧跟第一个问题，前缀到它就结束——六个问题里五个在它后面，每次都要重算，大部分内容白付全价。</li>
+<li><strong>答案放底部</strong>：六个问题固定，答案统一写在最后一个问题之后。前缀一口气穿过工具、系统和全部问题，只有答案是新增工作量。</li>
+</ul>
+<p>Anthropic 文档的要求也是后者：<strong>静态内容放提示开头</strong>。</p>
+<h2>4. 成本账本：写入 1.25 倍，5 分钟窗口</h2>
+<ul>
+<li>写入 5 分钟缓存：收 <strong>1.25 倍</strong>基准输入价。</li>
+<li>有效期默认 <strong>5 分钟</strong>，每次命中刷新计时。</li>
+<li>太短的提示不进缓存：最低门槛 512–4096 token，视模型而定。</li>
+<li>账很好算：多花的 0.25 倍写入费，第二次调用就回本；之后每次读六个固定问题只付一折。</li>
+</ul>
+<h2>5. 边界：模型专属，不要中途换模型</h2>
+<p>提示缓存是<strong>模型专属</strong>的。Claude Code 团队 2026 年 4 月的例子：和 Opus 聊了 10 万 token 后，换 Haiku 答一道简单题反而更贵——Haiku 没有这些 token 的缓存，要从头重建。切换模型 = 下一次请求零命中重读整个对话。团队的建议是用子代理：由 Opus 为另一个模型准备交接消息。</p>
+<h2>6. 与 KV Cache 的关系</h2>
+<p>提示缓存本质上是 <strong>KV cache 的跨请求复用</strong>：前缀的 K/V 已经算好存在服务端，新请求只算增量部分的注意力（新 token 对全部前缀的 attention）。这与推理引擎里的前缀缓存（prefix caching，如 vLLM/SGLang 的自动前缀复用）是同一思想在 API 层的产品化——区别在于 API 层要求调用方<strong>主动</strong>按"静态置顶"布局，而推理引擎多为自动匹配。</p>
+<h2>7. 落到实战的三条约束</h2>
+<ol>
+<li><strong>逐字匹配</strong>：模板渲染时注意空白、顺序、工具定义的序列化稳定性，任何抖动都杀死命中。</li>
+<li><strong>5 分钟窗口</strong>：低频调用享受不到；高频 agent 循环、批量任务是主要受益者。</li>
+<li><strong>模型专属</strong>：路由/降级策略要在"便宜模型"和"缓存命中"之间算总账，10 万 token 上下文下切模型几乎总是亏。</li>
+</ol>
+<h2>关联阅读</h2>
+<ul>
+<li>公众号已发：《Anthropic Prompt Caching：缓存命中只付0.1倍token价，静态内容放顶部》（2026-10-14，draft.id=TIqnnVEu6Oy3-wtKttGa0QR0WLnUd_gJzT-sV2tzYZIjFEsbRX3RIX4hB4xmj6W4）</li>
+<li>素材池相关：LangChain deep-agents prompt caching、Sebastian Raschka coding-the-kv-cache、Marvell 光互连 CXL 扩展 KV Cache</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
