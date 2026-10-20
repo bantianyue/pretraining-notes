@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muse Glimmer 30B：端侧智能体模型 · 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Muse Glimmer 30B：端侧智能体模型 · 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://huggingface.co/meta-models/Muse-Glimmer-30B">https://huggingface.co/meta-models/Muse-Glimmer-30B</a></div>
+<h1>《Muse Glimmer 30B: An On-Device Agentic Model》· 中文精读</h1>
+<blockquote>
+<p>原文：技术报告 PDF（Meta Superintelligence Labs，2026-10-19）；模型 https://huggingface.co/meta-models/Muse-Glimmer-30B ；博客 https://research.meta.ai/blog/introducing-muse-glimmer-open-agentic-model
+精读日期：2026-10-21 ｜ 归属学习目标：掌握大模型预训练技术（训练核心流程、蒸馏、量化）
+星级：⭐⭐⭐⭐⭐ ｜ 主题：训练核心流程、蒸馏、后训练、低精度量化、推理优化、端侧部署</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>Meta 的端侧智能体模型：约 29.6B 稠密语言模型 + 1.8B 感知编码器，全部设计被 <strong>32 GB 显存上限</strong>支配。方法论上最值得学的三件事：<strong>架构选型先跑阶梯幂律实验再拍板</strong>（稠密胜 MoE、GQA 胜简化 MLA，两个否决都有数据）；<strong>预训练与后训练两级都从 Muse Spark 蒸馏</strong>（logit 蒸馏 + 在策略蒸馏）；<strong>量化用 ΔNLL 筛选 + 进化搜索做混合精度分配</strong>（EvoPress 把 55.7 GB 压到 19.65 GB，下游精度 75.6 vs BF16 的 75.7）。</p>
+<h2>1. 架构选型：先做阶梯实验，再定架构</h2>
+<ul>
+<li>约束先行：目标是在 32 GB 显存内推理。三条逐步放大的架构阶梯（稠密、1:8 稀疏 MoE、1:16 稀疏 MoE）在<strong>相同推理显存</strong>下对比，目标规模按各架构的 TPP（每参数 token 数）反推：稠密 550 TPP、MoE 2800/6000 TPP。</li>
+<li>幂律拟合结论：给定算力与规模下，稠密的计算效率是 MoE 的 <strong>2–2.5 倍</strong>，三条阶梯都处于过训练区间。最终选稠密 30B。</li>
+<li>同样的方法否决了简化 MLA：全局层把 KV 投影成单个联合向量，两种配置（KV 减半 / 头数加倍）在 RULER 等长上下文评测上都不如 GQA，保留 GQA。</li>
+<li>启发：选型争议（Dense vs MoE、GQA vs MLA）不要靠品味，用小规模阶梯 + 幂律外推 + 目标约束（显存）裁决。</li>
+</ul>
+<h2>2. 注意力与 KV cache 预算</h2>
+<ul>
+<li>GQA 32 查询头 / <strong>2 个 KV 头</strong>（16:1），头维度 128，门控注意力全层启用。</li>
+<li>模式为 <strong>[局部×3, 全局×1] 循环</strong>：局部层滑动窗口 2048 压 KV 增长，全局层保长程信息流。</li>
+<li><strong>RoPE（θ=500,000）只加局部层</strong>，全局层借邻近局部层的位置信号，换取上下文可扩展性。</li>
+<li>FFN 为 SwiGLU，中间维度 19,968（约 3× 隐藏维度 6656）；嵌入与输出投影不共享，各约 1.34B。</li>
+</ul>
+<h2>3. 预训练 = logit 蒸馏（不是从零训）</h2>
+<ul>
+<li>协同蒸馏：教师 Muse Spark 预训练时记录每位置 <strong>top-256 logits</strong>，学生学这份分布。</li>
+<li>损失配方：前 95% 只用 KL；<strong>最后 5% 切纯 CE</strong>，修 top-k 截断偏差。这是对截断蒸馏常见坑的明确处理。</li>
+<li>分词器沿用 Llama 4 BPE，词表 202,048；基础词表数据配比代码 35% / 多语言 35% / 数学 15% / 英语 15%，特殊 token 由多模态、推理、智能体共用。</li>
+</ul>
+<h2>4. Checkpoint 平均（souping）的配方细节</h2>
+<ul>
+<li>预训练末 5% 每 200 步存一个 checkpoint（共 84 个），扫均匀平均 / WMA / EMA 与窗口、步长。</li>
+<li>结论：<strong>短窗口（200 步间距）一致更好</strong>，EMA/WMA 略稳但最优配置接近；最终配方 = 最后 checkpoint + 间隔 600 步的 3 个先前 checkpoint 做均匀平均，各困惑度评测一致优于单 checkpoint。产物作中训练初始化。</li>
+</ul>
+<h2>5. 中训练两段：先注领域，再扩上下文与智能体</h2>
+<ul>
+<li>Phase 1 领域注入：有机数据 + 合成推理轨迹与结构化求解示范，低学习率，平衡合成收益与有机困惑度回归。</li>
+<li>Phase 2 智能体：上下文 32K → 128K，换工具使用与智能体轨迹数据；<strong>损失从蒸馏改回 CE</strong>，理由是分布偏移后教师 logits 不可靠。这个「何时不再信教师」的判断点值得记住。</li>
+</ul>
+<h2>6. 后训练三步：SFT → 在策略蒸馏 → 多目标 RL</h2>
+<ul>
+<li>教师轨迹策展：多轮 RL/RLHF 运行中挑 checkpoint，只留奖励过阈值的轨迹（优先后期）；剥评估元数据与提示回显，含教师身份的整条剔除，再做 schema 与工具调用结构校验。</li>
+<li><strong>在策略蒸馏</strong>放在 SFT 与 RL 之间：学生在自己访问的前缀上收教师逐 token 分布目标，治训练-推理分布偏移，实测稳定改善后续 RL，优于 SFT 直进 RL。</li>
+<li><strong>推理强度</strong>在 RL 里训：样本分子组施加不同长度惩罚对应 low/medium/high/xhigh；全谱训练对高强度有正则化收益，最终用路由方案（一部分提示只走高强度）平衡步数与能力。推理时靠系统提示末尾一条指令切换，不重训。</li>
+</ul>
+<h2>7. 量化选型：ΔNLL 筛选 + 混合精度搜索</h2>
+<ul>
+<li>目标：BF16 55.7 GB → 语言模型权重 &lt;20 GB（给 KV cache、草稿模型、编码器留位），部署分 32 GB（EvoPress）与 24 GB（Q4KM）两档。</li>
+<li>筛选指标用相对 BF16 的 <strong>ΔNLL</strong>（留出文本+代码），与 15 个下游任务的平均精度排序基本一致，可作廉价代理指标。</li>
+<li>静态路线：Q4_K_M 改版（升精度扩到全层；INT4/INT6、组 128）与浮点路线 NVFP4（组 16）+ MXFP8（组 32），校准用 weight-only AWQ-Lite 把缩放因子折进 BF16 后一次铸型。</li>
+<li>动态路线：Greedy-KL 按「每省一字节的 KL 增幅」降精度；<strong>EvoPress 进化搜索</strong>在 418 个权重单元（注意力 Q/K/V/输出门、FFN 门/上投影各自独立）上搜混合精度，无张量强制高精度。胜出配置 Q4_K/Q5_K/Q6_K = 51/130/237 个单元，嵌入选 Q4_K、输出投影 Q5_K，总量 19.65 GB。</li>
+<li>关键观察：方案保守时，量化<strong>不显著拉长思维链</strong>（回复长度与 BF16 相当），低比特常见的 CoT 膨胀没有出现。</li>
+</ul>
+<h2>8. 投机解码：DFlash 块扩散草稿头</h2>
+<ul>
+<li>草稿模型是块扩散模型：一次前向给整块边际概率，独立采样成块；5 层、块 16、全层滑窗 2048，Q 头 32 对齐目标、KV 头 8。</li>
+<li>草稿头读目标模型第 {1, 13, 25, 37, 49} 层的隐藏特征（52 层均匀取 5 层）。</li>
+<li>训练用目标模型的在策略 rollout 离线监督，锚点以 1/16 速率采样，目标为 D-PACE 动态位置感知交叉熵。发布物含全精度权重、4-bit 权重与 DFlash 头，Apache 2.0。</li>
+</ul>
+<h2>9. 可迁移清单</h2>
+<ol>
+<li>架构选型 = 约束（显存）+ 阶梯实验 + 幂律外推，先实验后站队。</li>
+<li>蒸馏配方要处理截断偏差：KL 主体 + 末段 CE 收尾。</li>
+<li>Souping 用短窗口多 checkpoint 均匀平均，是近乎免费的初始化增益。</li>
+<li>中训练分段换目标时，同步换损失（分布偏移后弃教师 logits）。</li>
+<li>在策略蒸馏夹在 SFT 与 RL 之间，先治分布偏移再上 RL。</li>
+<li>量化选型用 ΔNLL 做廉价筛选，混合精度分配可进化搜索，单元粒度细到注意力子切片。</li>
+</ol>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
