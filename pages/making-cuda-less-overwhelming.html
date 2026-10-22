@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>让 CUDA 不再吓人:从 H100 硬件到 FlashAttention 的一条学习线 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>让 CUDA 不再吓人:从 H100 硬件到 FlashAttention 的一条学习线</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://thelastone07.github.io/blog/making_cuda_less_overwhelming/">https://thelastone07.github.io/blog/making_cuda_less_overwhelming/</a></div>
+<h1>让 CUDA 不再吓人：从 H100 硬件到 FlashAttention 的一条学习线</h1>
+<ul>
+<li>原文：<a href="https://thelastone07.github.io/blog/making_cuda_less_overwhelming/">Making CUDA less overwhelming</a>（个人技术博客，2026-10-22 收藏）</li>
+<li>主题：Kernel 优化、GPU 架构、GEMM、FlashAttention</li>
+<li>一句话要点：先硬件后算子——H100 的 SM/warp/内存层级决定优化的形状；GEMM 四级解法与 FlashAttention 都是「分层复用」这同一件事的不同切面。</li>
+</ul>
+<h2>核心论点</h2>
+<p>CUDA 的学习顺序应该倒过来：多数教程从 API 与语法开始，读者被迫在不知道硬件长什么样时背编程模型。这篇的路径是先拆硬件（H100），再看内存层级，然后所有算子优化都变成在硬件约束内做复用与搬运的权衡。贯穿全篇的目标函数只有一个：让 GPU 一直有活干，并且每搬运一个字节多做计算（提高 FLOP/B）。</p>
+<h2>硬件层（写算子前必须内化的约束）</h2>
+<ul>
+<li>编译链：C++ → PTX（虚拟 ISA，跨代解耦）→ SASS（本代机器码）。性能结论最终要回 SASS 验证：访存是否合并、寄存器是否复用、是否向量化，源码层猜不准。</li>
+<li>H100 组织：8 个 GPC → SM → 4 个象限；每象限 256 个 CUDA 核 + 1 个 Tensor 核。block 整体派发到一个 SM，上限 1024 线程。</li>
+<li>warp = 32 线程锁步执行：分支发散串行化；延迟隐藏靠多 warp 驻留轮换，驻留量（occupancy）由寄存器与 SMEM 用量决定。寄存器溢出（spilling）落本地内存，速度掉一个数量级。</li>
+</ul>
+<h2>内存层（优化的主战场）</h2>
+<ul>
+<li>层级：VRAM → L2/L1 → SMEM（显式管理、block 共享）→ 寄存器。</li>
+<li>SMEM bank：32 个 bank × 4B = 128B/cycle；多线程同 bank 不同地址 = bank conflict，几路冲突慢几倍。按行存按列读是经典冲突源。</li>
+<li>GMEM 合并访问：按 32B sector 取数，效率 = 用到字节 / 读入字节；线程顺序不重要，地址集合紧凑才重要。</li>
+<li>搬运三代进化：寄存器中转 → Ampere cp.async（GMEM 直达 SMEM，绕寄存器、可流水）→ Hopper TMA（描述符驱动多维拷贝；小/不规则拷贝仍用 cp.async）。</li>
+<li>swizzle：地址异或置换把访问打散到不同 bank，同一布局同时满足写（连续）与读（Tensor Core 形状）两种模式，代价只是一次异或。</li>
+</ul>
+<h2>GEMM 四级解法（Roofline 驱动的复用阶梯）</h2>
+<p>判据先行：Roofline 按访存强度分访存受限 / 计算受限；四级解法就是把强度沿横轴右推。</p>
+<ol>
+<li>每线程一元素：2N FLOPs 对 8N 字节，强度 0.25 FLOP/B，纯带宽受限，A 行/B 列被整行整列重复读，复用为零。</li>
+<li>SMEM 16×16 分块 + 部分和：每元素进 SMEM 后复用 16 次，每线程 GMEM 加载降到 N/8，强度 ×16。</li>
+<li>寄存器分块（每线程 TM×TK 输出片）：A 列片段 × B 行片段在寄存器内全组合，强度再 ×8 量级；代价是寄存器压力与 occupancy 的权衡，参数空间 BM/BN/BK/TM/TK 交给自动调参。</li>
+<li>向量化 float4 加载 + A 转置写入 SMEM：按 Simon Veit 的 A6000 实测，解法三约 cuBLAS 的 70%，向量化再 +10 个百分点。</li>
+</ol>
+<p>其余通用手法：ILP（线程内多发独立指令）、warp tiling（block 输出按 warp 切 2×2、线程各算 4×4，排布对齐 Tensor Core 取数）。</p>
+<h2>FlashAttention（同一思想在注意力上的投影）</h2>
+<ul>
+<li>朴素实现把 S=QK^T 物化到 HBM 再读回，是主要开销；FlashAttention 按行并行、K/V 分块流式读入，S 只活在片上。</li>
+<li>在线 SoftMax：滚动维护最大值 m 与指数和 l；新最大值出现时旧部分和乘 e^(m旧−m新) 统一缩放，一遍完成且数值稳定（指数项 ≤1）。</li>
+<li>实现骨架 = 分块 GEMM + 两级归约：warp 内 __shfl_down_sync 在寄存器间合并 m/l/部分和，跨 warp 再合并一次。</li>
+<li>各代（FA1→）差异只是工程取舍：少往返 HBM、SoftMax 与 GEMM 流水重叠、低精度换吞吐。</li>
+</ul>
+<h2>归约的五步（可迁移的微优化模板）</h2>
+<p>隔位相加（发散+跳跃）→ 顺序寻址 → 加载时先加一轮（block 数减半）→ warp shuffle 替代 SMEM 归约（省 5 轮循环与同步）→ 已知块大小全展开。没有一步改算法，全在砍等待：发散、跳跃访问、同步、循环开销。</p>
+<h2>与已有收藏的关系</h2>
+<ul>
+<li>与《GEMM-CUDA优化-中文精读》（⭐⭐⭐）互补：那篇是 GEMM 单点手写路线，这篇把 GEMM 放回硬件与 Roofline 的完整语境，并延伸到 FlashAttention 与归约。</li>
+<li>swizzle 部分与《Tensor Core MMA Swizzle Layout》（⭐⭐⭐⭐）互相印证：那篇是 layout 图解全集，这篇给出 swizzle 在 GEMM 主线中的位置。</li>
+<li>读 PTX 一节的方法（逐条对照、盯寄存器复用）与 HINT4 篇「不信源码信 SASS」的方法论一致。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
