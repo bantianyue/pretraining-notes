@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>torchtitan 年度更新精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>torchtitan 年度更新精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://pytorch.org/blog/torchtitan-update-new-sota-models-performance-at-scale-titanrl/">https://pytorch.org/blog/torchtitan-update-new-sota-models-performance-at-scale-titanrl/</a></div>
+<h1>torchtitan 年度更新精读：TitanRL、FlexShard 与检查点换代</h1>
+<ul>
+<li>原文：TorchTitan updates: New SOTA models, Performance at scale, and TitanRL（PyTorch 官方博客，2026-10）</li>
+<li>评级：⭐⭐⭐⭐⭐（训练框架主线更新：新模型接入、RL、性能、检查点、分片策略全线）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>torchtitan 把「可组合」做成全栈原则：配置、kernel、分片策略、训练路径都可替换且数值可验证；TitanRL 让预训练与 RL 共用一份模型定义，检查点与 Muon 等基础设施同步换代。</p>
+<h2>关键内容</h2>
+<h3>1. 新模型接入靠可组合配置</h3>
+<ul>
+<li>原生接入 Muse Spark Open/Glimmer、Qwen3-VL/3.5、Kimi K2.7/K3、DeepSeek-V4，均为含 5D 并行的完整训练栈。</li>
+<li>类型化 recipe + 模型配置 transform + 定点 override：换并行、换组件、换 kernel 不再维护模型分支。</li>
+<li>Attention Gym kernel（Gated DeltaNet、KDA、稀疏注意力）与 Helion kernel（融合 RoPE）经同一接口接入，兼容 torch.compile。</li>
+</ul>
+<h3>2. TitanRL：同一份模型做预训练与 RL</h3>
+<ul>
+<li>训练与生成两份实现不一致是 RL 调试的经典噪声源；TitanRL 让同一模型定义贯通预训练、后训练与 vLLM 生成。</li>
+<li>batch-invariant 模式：支持的 on-policy 配置下，训练器与生成器 log 概率逐位一致，差距恒为零，数值失配可单独归因。</li>
+<li>rollout 异步，训练与生成各自独立扩展并行；SWE-Rebench（64K，40×GB300）与 terminal-bench（128K，20×GB300）上 Qwen3.5-35B-A3B 稳定训练数百步。</li>
+</ul>
+<h3>3. 性能三件套</h3>
+<ul>
+<li>local_compile：选择性编译关键区域，保数值、不维护定制 kernel。</li>
+<li>torch_remat：细粒度激活重算 API。</li>
+<li>Dist-MoE：SM100+ 融合通信计算 kernel，动态张量激活打包、全程可 CUDA graph 化（与本站 Dist-MoE 条目互参）。</li>
+<li>组合结果（GB300，MXFP8，MLPerf 口径）：DSV3 671B+MTP1，PP2-512 全局 TPS 2,694,493，单卡 1,535.93 TFLOPs；Muse Spark 1.2 在 192K 上下文、强制均衡路由下 MFU 37.17%（学习路由 31.27%，路由均衡的价值被量化）。</li>
+</ul>
+<h3>4. FlexShard：FSDP2 表达不了的分片策略</h3>
+<ul>
+<li>bucket 中心 API + 自定义 Placement；新增 Owned（单 rank 全参数）与 BlockShard（2D tile 对齐）。</li>
+<li>分布式 Muon：Muon 参数用 Owned/BlockShard 放置，更新免 AllGather，DSV3 256×H100 优化器耗时最多降 79%。</li>
+<li>块量化 AllGather：分片边界按定义对齐量化块，通信量约减半且无缩放因子额外通信，Llama3 405B 单步时间最多降 20%。</li>
+</ul>
+<h3>5. 基础设施</h3>
+<ul>
+<li>GraphTrainer：图模式与 eager 数值逐位一致，打开跨模块融合与异构加速器支持。</li>
+<li>PyTorch 2.14 新 NCCL 后端（torchcomms 移植入 c10d）：单边 RMA 窗口、原地进程组重配置、shrink/grow 与 suspend/resume 原始访问。</li>
+<li>对称内存：MoE 走 Dist-MoE 对称内存分发；FSDP 通信缓冲可从对称内存池分配，NCCL 可用 copy-engine all-gather。</li>
+<li>torch_checkpointing：首次保存后零集合通信（对比 DCPv1 每次保存同步、GLOO 在 16k+ rank 扩展性差）。512×H100 DSV3、间隔 50 步：阻塞 841.2→34.1 ms，写入 384.4→13.1 s（约 29 倍），加载 194.7→79 s。</li>
+</ul>
+<h2>与已有收藏的关系</h2>
+<ul>
+<li>与「Dist-MoE」条目：Dist-MoE 在 torchtitan 中已是一等公民（MoE 层 + 现成 DSV3 配方）。</li>
+<li>与「GEMM/CUDA 教程」：框架层的 kernel 接入（Attention Gym/Helion）与手写 kernel 路线互补。</li>
+<li>TitanRL 的同栈思路与本站 SGLang/VeRL 相关条目对照：veRL 已把 torchtitan 集成为训练后端。</li>
+</ul>
+<h2>待跟进</h2>
+<ul>
+<li>FlexShard 开源节奏与 API 稳定性；Muon 分布式实现的细节文档。</li>
+<li>TitanRL 的 batch-invariant 支持范围（哪些 on-policy 配置）。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
