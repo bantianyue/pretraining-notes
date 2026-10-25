@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CUDA 启动队列：相同的 Transformer 层为何卡住 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>CUDA 启动队列：相同的 Transformer 层为何卡住</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://x.com/jino_rohit/status/2113855331801706646">https://x.com/jino_rohit/status/2113855331801706646</a></div>
+<h1>CUDA 启动队列精读：相同的 Transformer 层为何卡住</h1>
+<ul>
+<li>原文：Understanding CUDA Launch Queues（X 文章，2026-10-24 发布）</li>
+<li>评级：⭐⭐⭐⭐（主题 GPU Kernel 优化 / 启动开销；实测驱动的机制解释，阈值行为对推理排布有直接指导）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>CUDA 启动队列不是无限深的缓冲：同一 Transformer 层反复启动 512×512 matmul 时，主机提交耗时在 1040 次提交附近从约 1.8ms 跃升到 5.46ms，1200 次达 36.70ms，2000 次达 202.68ms；队列满后主机被迫等待，层与层之间出现本不该有的气泡。</p>
+<h2>机制主线</h2>
+<ol>
+<li>实验设置：RTX 4060 Ti 上反复启动同一 512×512 matmul 内核，记录主机端提交耗时随累计提交次数的变化。</li>
+<li>阈值行为：1000 次提交 1.74ms、1030 次 1.78ms、1050 次 5.46ms、1100 次 15.24ms、1200 次 36.70ms、2000 次 202.68ms（约为 1000 次时的 116 倍）。1040 是观测到的拐点，不是 CUDA 公开常量。</li>
+<li>解释：启动队列填满后，主机提交路径从异步排队退化为同步等待；同一层反复执行时队列来不及排空，延迟逐层累积。</li>
+<li>对 Transformer 的意义：层数多、每层算子多、单算子小时，启动开销占比被放大；看起来的“层间卡住”可能不是算子本身慢，而是提交侧被队列背压拖住。</li>
+<li>应对方向：减少单步提交次数（算子融合、CUDA Graphs 捕获整段执行、增大单次启动的工作量），而不是只盯着单个 kernel 的执行时间。</li>
+</ol>
+<h2>与已有收藏的关系</h2>
+<ul>
+<li>与《CUDA 硬件优先教程》精读互补：那篇讲 SM/内存层级与 GEMM 优化，这篇补主机侧启动队列这一常被忽略的瓶颈。</li>
+<li>与 DeepGEMM MegaMoE 的 NUMA 精读同属“实测驱动的性能机制”一类：瓶颈不在算力，而在数据与任务到达计算单元的路径上。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
