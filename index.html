@@ -218,6 +218,46 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span>收藏于 2026-10-22</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">19</span>《CUDA 启动队列：相同的 Transformer 层为何卡住》</h3>
+  <p>主机提交耗时在 1040 次提交附近从约 1.8ms 跃升到 5.46ms，2000 次达 202.68ms；层间卡住可能源于启动队列背压，解法是算子融合与 CUDA Graphs。</p>
+  <div class="links">
+    <a class="cn" href="pages/cuda-launch-queues.html">中文精读 →</a>
+    <a class="en" href="https://x.com/jino_rohit/status/2113855331801706646">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">启动开销</span><span>收藏于 2026-10-25</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">20</span>《GPU 通信（一）：从 IPC 句柄到 NVSwitch 的跨进程共享全链路》</h3>
+  <p>页表与 pinned 内存、/dev/shm 与 IPC 句柄、PCIe/NVLink/NVSwitch 代际接力，SGLang 在此之上做跨进程共享。</p>
+  <div class="links">
+    <a class="cn" href="pages/gpu-communications-1.html">中文精读 →</a>
+    <a class="en" href="https://piyushk52.github.io/jekyll/update/2026/10/22/mem_share.html">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">GPU 通信</span><span class="tag">多卡互连</span><span>收藏于 2026-10-25</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">21</span>《OCP 2026 协同设计：供电、液冷与网络必须同步扩展》</h3>
+  <p>800V 直流、PG25 单相液冷、2MW CDU、铜缆四档与 UALink/UET；供电、液冷、网络三套系统必须同步扩展，任何一套掉队都会成为瓶颈。</p>
+  <div class="links">
+    <a class="cn" href="pages/ocp-2026-co-design.html">中文精读 →</a>
+    <a class="en" href="https://www.siliconcodesign.com/p/ocp-2026-co-designing-an-ai-cluster">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">AI 集群</span><span class="tag">系统设计</span><span>收藏于 2026-10-25</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">22</span>《Blackwell NUMA：单颗 GPU 里的两个局部性域》</h3>
+  <p>指针追逐定 SM 归属（1.25 倍门槛）、权重沿 N 切半、亲和调度（2 波以上才跨 Die 窃取）、TMA 4 维描述符；省约 100W，重载时钟高 5-10%。</p>
+  <div class="links">
+    <a class="cn" href="pages/blackwell-numa.html">中文精读 →</a>
+    <a class="en" href="https://vincentzed.com/writing/blackwell-numa">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">NUMA</span><span class="tag">MoE</span><span>收藏于 2026-10-25</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
