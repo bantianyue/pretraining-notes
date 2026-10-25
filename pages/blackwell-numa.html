@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blackwell NUMA：单颗 GPU 里的两个局部性域 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Blackwell NUMA：单颗 GPU 里的两个局部性域</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vincentzed.com/writing/blackwell-numa">https://vincentzed.com/writing/blackwell-numa</a></div>
+<h1>Blackwell NUMA 精读：单颗 GPU 里的两个局部性域</h1>
+<ul>
+<li>原文：Blackwell Brings NUMA Back, Inside One GPU（Vincent Zhong 个人博客，2026-10-23）</li>
+<li>评级：⭐⭐⭐⭐（主题 GPU Kernel 优化 / NUMA / MoE；DeepGEMM MegaMoE 的实测机制，含完整探测与调度代码）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>B200/B300 软件上是一块 GPU，物理上是两颗经 NV-HBI 相连的 Die；DeepGEMM 的 MegaMoE 把每颗 Die 当作独立局部性域：先实测 SM 归属，再把权重沿 N 切半分置，最后用亲和调度让 SM 只读本 Die，跨 Die 窃取只在 2 波以上工作时才允许。</p>
+<h2>机制主线</h2>
+<ol>
+<li>问题：CUDA 呈现一个设备、平坦地址空间与统一 L2，但本 Die 的 HBM 明显近于另一颗 Die 的 HBM；MoE 层忽视局部性会把一半权重跨链路拉取。</li>
+<li>定位：CUDA 无接口告知 SM 属于哪颗 Die，DeepGEMM 用指针追逐实测：每 SM 一个 32 线程块占满共享内存、仅 thread 0 追逐，ld.global.cg 绕 L1、事前刷 L2，测 HBM 往返延迟；8 块中位数定归属，远 Die 慢 1.25 倍以上且同 TPC 两 SM 一致才接受，最多重试 5 次否则均分；收割 SM 的不对称靠重分少量 TPC 补齐 50-50。</li>
+<li>切分：权重沿 N 切分，(B, N, K) 变成 (2, B, N/2, K)，第 d 片存入第 d 颗 Die 的 HBM；虚拟地址映射经 cuMemAddressReserve/cuMemMap 实现，CUDA 13.4 前按 Die 分配靠 MLOPart（MPS 模式，每 Die 暴露为独立设备）绕过。</li>
+<li>调度：持久化调度器每 Die 配独立任务计数器，任务映射到本 Die 的半个 N；跨 Die 窃取只在层内工作达到 2 波以上时允许，小层直接跳过；权衡是窃取的延迟与链路占用 vs 本地 Die 空闲。</li>
+<li>寻址：TMA 描述符是 4 维 [K, N/2, die, expert]，CTA 用坐标选半，die 维步长直接跨物理切分；正常时坐标与 SM 所在 Die 一致，内层循环无分支、无地址重算。</li>
+<li>收益：发布说明提到省约 100W 封装功耗，重载下 GPU 时钟高 5-10%。</li>
+</ol>
+<h2>与已有收藏的关系</h2>
+<ul>
+<li>与 GPU 通信精读直接呼应：那篇是多卡与多进程间的共享与互连，这篇是单卡内双 Die 的局部性，两篇合起来是从 Die 内到机群的局部性全景。</li>
+<li>与 CUDA 启动队列精读同属“实测驱动的性能机制”一类：瓶颈不在算力，而在数据与任务到达计算单元的路径上。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
