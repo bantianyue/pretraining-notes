@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 通信（一）：从 IPC 句柄到 NVSwitch 的跨进程共享全链路 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>GPU 通信（一）：从 IPC 句柄到 NVSwitch 的跨进程共享全链路</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://piyushk52.github.io/jekyll/update/2026/10/22/mem_share.html">https://piyushk52.github.io/jekyll/update/2026/10/22/mem_share.html</a></div>
+<h1>GPU 通信（一）精读：从 IPC 句柄到 NVSwitch 的跨进程共享全链路</h1>
+<ul>
+<li>原文：GPU Communications - I（个人技术博客，2026-10-22）</li>
+<li>评级：⭐⭐⭐⭐（主题 GPU 通信 / 多卡互连 / 推理框架；从页表到 NVSwitch 的全栈梳理，SGLang 落点明确）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>GPU 间共享内存不是一个机制，而是四层接力：页表与 pinned 内存决定数据能不能被别的设备访问，/dev/shm 与 IPC 句柄解决跨进程传递，PCIe/NVLink/NVSwitch 决定跨设备带宽与拓扑，SGLang 在此之上做跨进程共享。</p>
+<h2>机制主线</h2>
+<ol>
+<li>基础：页表与 pinned（页锁定）内存是跨设备访问的前提；NUMA 位置决定本地与远端访问的延迟差。</li>
+<li>跨进程：/dev/shm 做共享内存载体，CUDA IPC 句柄把设备内存导出给另一进程；文中含 CPU /dev/shm 演示、CUDA IPC ctypes 演示两段核心代码。</li>
+<li>互连代际：PCIe、NVLink、NVSwitch 三代互连的带宽与拓扑差异是全文唯一真表格承载的对比；NVLink peer kernel 演示点对点访问。</li>
+<li>框架落点：SGLang 的跨进程共享用法建立在上述机制之上；cudaMallocAsync 在特定条件下会拒绝分配，文中以演示代码说明边界。</li>
+<li>两个未带入的点：源站有两段视频动画（一跳 All-reduce、SHARP 组播），微信草稿无法承载视频，已在正文中改文字描述机制。</li>
+</ol>
+<h2>与已有收藏的关系</h2>
+<ul>
+<li>与 Blackwell NUMA 精读直接呼应：那篇是单卡内双 Die 的局部性，这篇是多卡与多进程间的共享与互连，两篇合起来是从 Die 内到机群的局部性全景。</li>
+<li>与 OCP 协同设计精读互补：那篇讲机群供电/液冷/网络的系统权衡，这篇讲 GPU 通信的机制层实现。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
