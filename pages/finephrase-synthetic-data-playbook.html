@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>《The Synthetic Data Playbook》· 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>《The Synthetic Data Playbook》· 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://huggingface.co/spaces/HuggingFaceFW/finephrase">https://huggingface.co/spaces/HuggingFaceFW/finephrase</a></div>
+<h1>《The Synthetic Data Playbook: Generating Trillions of the Finest Tokens》· 中文精读</h1>
+<blockquote>
+<p>原文：https://huggingface.co/spaces/HuggingFaceFW/finephrase（英文，HuggingFaceFW 交互式研究文章）
+精读日期：2026-10-26 ｜ 主题：预训练数据 × 合成数据 ｜ ⭐⭐⭐⭐⭐</p>
+</blockquote>
+<h2>0. 一句话总览</h2>
+<p>合成数据怎么做才不再是炼金术？HuggingFaceFW 用 333 次训练-评估实验、90 个改写配置、超过 1 万亿个生成 token、12.7 GPU 年，把"改写网页数据"变成可复现的配方：<strong>Prompt 设计是最大的杠杆</strong>。最终成品 FinePhrase 用 4 个教学型结构 Prompt（FAQ、Math、Table、Tutorial）把 3.39 亿篇 FineWeb-Edu 文档改写成 486B token 合成数据，全面超过 DCLM、Cosmopedia、Nemotron-HQ-Synth、REWIRE 等已有基线。</p>
+<h2>1. 为什么合成数据成为预训练标配</h2>
+<p>预训练数据的范式经历了三次转移：</p>
+<ul>
+<li><strong>规模阶段</strong>：从维基百科式小数据集到 C4、The Pile 的数百 GB，再到 FineWeb、DCLM 的万亿 token 级，基本覆盖可爬取的网页。</li>
+<li><strong>质量阶段</strong>：逼近网页数据上限后，讨论转向质量——更强的启发式与去重，再到神经分类器筛选"教育性"或"指令类"数据。FineWeb-Edu 用 Llama-3-70B 打教育质量分，DCLM 用模型过滤做到 7B 模型、2.6T token 达到 64% MMLU。</li>
+<li><strong>合成阶段</strong>：网页文本基本耗尽、质量优先的结论确立后，合成数据成为把分类器原本会丢弃的数据"升级再利用"、重新扩大数据量的手段。Cosmopedia 是早期例子（Mixtral 生成 25B token 教科书与故事）。如今 NVIDIA 用 LLM 改写约 2T token 网页文本做 Nemotron-CC，Z.ai 生成 500B 推理 token 做 GLM-4.5 的中期训练。</li>
+</ul>
+<p>一个常见质疑是模型崩溃。文章的回应是：崩溃发生在闭环、自产自销、无新信号的设定里；真实管线是合成与人类数据混合、Prompt 中引入多样参考材料、策略性使用。超过 1000 个 LLM 的大规模实证研究表明，约 30% 改写合成数据与自然网页文本混合可以把预训练收敛加速 5–10 倍，且无退化迹象。</p>
+<h2>2. 实验设计：三轴扫描</h2>
+<p>实验沿三个轴展开：</p>
+<ol>
+<li><strong>改写策略</strong>：比较已有方法（REWIRE 的 guided rewriting、Nemotron 的 QA 对与知识抽取、BeyondWeb 的续写与摘要）与 9 个新格式（article、commentary、discussion、explanation、faq、math、narrative、table、tutorial）。</li>
+<li><strong>生成模型</strong>：跨模型家族（Gemma、Llama、Qwen、Granite、Falcon、SmolLM）、跨代际（Qwen 1.5 到 Qwen 3）、跨规模（270M 到 27B）。</li>
+<li><strong>源数据质量</strong>：高质量源（FineWeb-Edu-HQ、DCLM）与低质量源（FineWeb-Edu-LQ、Cosmopedia）都改写，检验改写是"抢救"噪声文档还是放大既有质量差异。</li>
+</ol>
+<p>评估协议是训练-评估闭环：改写数据与原始数据按比例混合后训练学生模型，在 ARC、HellaSwag、PIQA、SQuAD、GSM8K、DROP、WinoGrande 等基准上测聚合分数。早期实验用 1.7B 学生模型，后续学生尺寸扫描覆盖 0.5B 到 6.2B。</p>
+<h2>3. 锚点发现：已有方法里只有两个 Prompt 能打平 DCLM</h2>
+<p>把 Nemotron-HQ-Synth 的 5 个 Prompt（diverse_qa_pairs、extract_knowledge、distill、wikipedia_style_rephrasing、knowledge_list）、REWIRE 的 guided_rewrite、BeyondWeb 的 continue 与 summarize 逐个拆出来，用 Gemma-3-1B 在 FineWeb-Edu-HQ 上改写、与 DCLM 基线对比，结果是：</p>
+<ul>
+<li><strong>聚合分数上，只有 diverse_qa_pairs 和 REWIRE 的 guided_rewrite 能打平 DCLM</strong>。BeyondWeb 的 continue 与 summarize 达不到 DCLM 水平。此前工作的 Prompt 命中率相当低。</li>
+<li><strong>聚合分数掩盖了一个鲜明的 trade-off</strong>：DCLM 在 HellaSwag 与 PIQA（常识推理）上压过全部合成 Prompt；几乎全部合成 Prompt 在 ARC（科学知识）与 SQuAD（阅读理解）上轻松超过 DCLM。改写本质上是在用常识推理换事实回忆。两侧增益大致抵消，所以聚合分数看起来持平。</li>
+<li>这个 trade-off 解释了后续三个关键结论：为什么混合原始数据重要、为什么 DCLM 是最好的 mix-in 数据集、为什么纯合成训练不如混合训练。</li>
+</ul>
+<h2>4. 新 Prompt：四个教学型结构胜出</h2>
+<p>9 个新 Prompt 中，<strong>FAQ、Math、Table、Tutorial 四个明确超过 DCLM</strong>，其余五个处于或低于 DCLM 水平。胜出的共性是：把源内容重构成教学上更丰富的格式，而不是简单改写。</p>
+<p>各胜出 Prompt 有不同的基准签名：</p>
+<ul>
+<li><strong>Table</strong>：ARC 提升最大（比 DCLM 高 7.5 个百分点）。</li>
+<li><strong>Math</strong>：唯一能实质推动 GSM8K 的 Prompt（+1.5pp，其余均在 ±0.5pp 内），SQuAD 增益也最大（+11.2pp）。数学推理需要数学专属内容，一般性的教学重构带不动。</li>
+<li><strong>Tutorial</strong>：唯一让 DROP 微升的 Prompt（+1.4pp，但落在 DROP 的运行噪声内，需谨慎看待）。</li>
+<li><strong>FAQ</strong>：聚合上稳胜 DCLM。</li>
+</ul>
+<p>常识推理的短板在新 Prompt 上依然存在：切到 HellaSwag 或 PIQA，全部 Prompt（包括四个胜出者）都低于 DCLM。新 Prompt 聚合胜出是因为 ARC 与 SQuAD 的增益压过了常识损失，而非全面提升。</p>
+<h2>5. 生成模型：1B 够用，SmolLM2-1.7B 最优</h2>
+<ul>
+<li><strong>规模</strong>：Gemma-3 从 270M 到 27B 的扫描显示，超过 1B 后收益迅速递减。对多数 Prompt，1B 生成器已经足够。</li>
+<li><strong>家族</strong>：SmolLM2-1.7B-Instruct 在全部 Prompt 上压过其他家族的大模型，成为 FinePhrase 的最终生成器。模板多样性比模板精致度更重要；一个输出更多样、略显"粗糙"的模型，可能胜过输出结构单一的精致模型。</li>
+<li><strong>学生尺寸会掩盖生成器差异</strong>：0.5B 学生下，生成器之间的宏观分数极差只有 0.004；2.9B 学生下极差扩大到 0.021，清晰分出三档：270M 最差、1B 居中、4B+ 一组最优。6.2B 学生不再扩大极差，只增加大生成器间的排序噪声。<strong>2.9B 是 sweet spot</strong>。早期 1.7B 学生实验里"大生成器无帮助"的结论，部分是学生太小压扁了差异。</li>
+<li><strong>学生扩大的收益大于生成器扩大</strong>：1.7B 学生升到 6.2B 平均带来约 +0.014；1B 生成器升到最优 4B+ 生成器只带来 +0.004 到 +0.014（依 Prompt 而定）。</li>
+</ul>
+<h2>6. 质量分数与多样性：没有捷径可以绕过训练评估</h2>
+<p>83 个实验的相关性分析表明，<strong>没有任何廉价代理指标能替代训练-评估</strong>：</p>
+<ul>
+<li><strong>DCLM 分数差（输出减输入）是最强单一预测因子</strong>，与聚合宏观分数的相关系数 ρ=0.61，输出端 DCLM 分数次之（ρ=0.56）。但即便最强指标也只解释约 37% 的方差。</li>
+<li><strong>Edu 分数会误导</strong>：输入端 edu 分数与聚合性能弱相关（ρ=0.27），但输出端 edu 分数几乎无相关（ρ=−0.08）。改写后 edu 分数普遍下降，尤其源数据质量高时更明显——因为 edu 分类器惩罚表格、FAQ、数学符号等格式变化，而这些格式变化恰恰提升下游性能。</li>
+<li><strong>DCLM 分数改写后几乎普遍上升</strong>：改写模型产出更干净、结构更清晰的文本，DCLM 分类器喜欢这种文本；但从输出 DCLM 分数到下游性能的斜率平缓且噪声大，高 DCLM 分数不保证好训练数据。</li>
+<li><strong>梯度空间多样性（G-Vendi）优于语义多样性</strong>：用冻结的 Qwen3-0.6B 代理模型对每个输出做自回归交叉熵损失反传，取最后一层 MLP down_proj 的梯度草图（1024 维随机索引采样）算 Vendi 分数。G-Vendi 在几乎全部基准上正相关，是推理任务的最佳单一预测因子（ρ=0.38），全面优于基于 bge-base-en-v1.5 嵌入的语义 Vendi。但它仍不能取代 DCLM 分数差，只能互补。</li>
+<li><strong>WinoGrande 与全部 tested 指标都不相关</strong>，多数分基准家族的信号低于 ρ=0.4。代理指标只能做候选数据集排序的初筛，不能替代训练评估。</li>
+</ul>
+<h2>7. FinePhrase 成品配方</h2>
+<p>实验结论直接拼成生产配方：</p>
+<ul>
+<li><strong>生成器</strong>：SmolLM2-1.7B-Instruct。</li>
+<li><strong>Prompt</strong>：FAQ、Math、Table、Tutorial。</li>
+<li><strong>源数据</strong>：FineWeb-Edu sample-350BT（源数据质量次要，配上强 mix-in 即可）。</li>
+<li><strong>规模</strong>：3.39 亿篇文档 × 4 个 Prompt → 13.5 亿样本、486B 完成 token。</li>
+<li><strong>推理配置</strong>：单卡 tp=1 + suffix-32 推测解码，SmolLM2-1.7B 单卡约 9200 token/秒；100 张 H100 并行约 3.3B token/小时，名义 612 GPU 天，实际约两周（含重启与集群争用）。</li>
+<li><strong>混合比例</strong>：20B token 扫描显示，四个最强格式下 60–80% 合成数据最佳；但另一项研究（demystifyingsynth）在其设定下发现约 30% 改写合成最优——最优比例随学生尺寸、训练长度、token 预算与混合多样性漂移，尚未定论。</li>
+<li><strong>工程实现</strong>：DataTrove 的 <code>generate_data</code> 脚本把配置、检查、断点续跑、Slurm 三作业编排（推理、监控、数据卡生成）、增量 Hub 上传包成不足 100 行的生产脚本。339M 文档规模下，单篇坏文档曾能拖垮整个 worker，<code>skip_bad_requests</code> 选项让推理器捕获 BadRequestError 并跳过问题文档继续跑。</li>
+</ul>
+<h2>8. 启示与未解问题</h2>
+<ul>
+<li><strong>Prompt 设计是最大杠杆</strong>：结构重构（表格化、FAQ 化、教程化、数学化）胜过简单改写；模板多样性胜过模板精致度。</li>
+<li><strong>评估协议本身需要校准</strong>：学生太小会压扁生成器差异；聚合分数会掩盖常识推理与事实回忆之间的 trade-off；分基准看签名比只看聚合分数更有信息量。</li>
+<li><strong>代理指标只做初筛</strong>：DCLM 分数差可用于候选排序，G-Vendi 可补推理信号，但训练评估绕不过去。</li>
+<li><strong>开放问题</strong>：改写后的重复数据能否更高频复用而不掉点；最优混合比随规模如何漂移；温度、top_p 等采样参数对改写质量的影响；best-of-N 过滤是否值得；扩散语言模型（LLaDA、Mercury 2）能否把生成成本压低 2–10 倍；Prompt 自动优化（DSPy）是否有效；100B+ token 长训练下 Prompt 排名是否稳定。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
