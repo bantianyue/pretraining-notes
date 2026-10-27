@@ -43,16 +43,6 @@
 <h2><span class="stars">⭐⭐⭐⭐⭐</span> 核心必读</h2>
 
 <div class="card hot">
-  <h3><span class="n">24</span><a href="pages/zero-memory-optimizations.html">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models 中英对照版</a></h3>
-  <p>训练期显存 16Ψ 全部可切：优化器状态、梯度、参数三段划分（P<sub>os</sub> → P<sub>os+g</sub> → P<sub>os+g+p</sub>）把单卡显存降到 16Ψ/N<sub>d</sub>，而通信量只增 1.5 倍。ZeRO-100B 在 400 块 V100 上跑出 15 Petaflops、装下 170B 模型，比当时 SOTA 大 8 倍、快 10 倍。含全文中英段落对照 + 图 1–8 + 表 1–10。</p>
-  <div class="links">
-    <a class="cn" href="pages/zero-memory-optimizations.html">中英对照全文 →</a>
-    <a class="en" href="https://arxiv.org/abs/1910.02054">英文原文</a>
-  </div>
-  <div class="meta"><span class="tag">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">显存优化</span><span class="tag">ZeRO / FSDP</span><span>收藏于 2026-10-27</span></div>
-</div>
-
-<div class="card hot">
   <h3><span class="n">01</span><a href="https://abcdabcd987.com/2026/09/07/no-pp/">如何不造出另一个 Megatron（一）：流水线并行是怎么污染整个训练框架的</a></h3>
   <p>PP 是"最不一样"的并行：直接把计算图沿层切开，概念泄漏到框架每个角落。气泡调参大战（GPipe → 1F1B → Zero Bubble → DualPipe）；后训练动态输入让 torchtitan 的固定调度溢出；序列填充 <code>[B,S]</code> vs <code>[T]</code> 之争（padding 浪费、不优雅、Unsloth loss bug）；torchtitan 的控制流分叉、模型手术（<code>setattr</code> 裁剪）、类型系统失效。结论：NVL72 + MoE 时代，PP 可以删掉——连 <code>PP=1</code> 的代码都不该留。</p>
   <div class="links"><a class="cn" href="https://abcdabcd987.com/2026/09/07/no-pp/">中文原文直达 →</a></div>
@@ -134,6 +124,16 @@
     <a class="en" href="https://huggingface.co/spaces/HuggingFaceFW/finephrase">英文原文</a>
   </div>
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">预训练数据</span><span class="tag">合成数据</span><span>收藏于 2026-10-26</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">24</span>《ZeRO: Memory Optimizations Toward Training Trillion Parameter Models》（微软 DeepSpeed）</h3>
+  <p>零冗余切分：ZeRO-DP 把优化器状态、梯度、参数三级切分到各数据并行进程，单卡模型状态显存随卡数线性下降，7.5B 模型 64 卡下从 120GB 降到 1.9GB；ZeRO-R 用分区激活检查点、定长缓冲、实时整理处理剩余显存；三级全开通信量也只从 2Ψ 升到 3Ψ，为基线数据并行的 1.5 倍；400 卡训出 170B 模型、平均 15 Petaflops，60B 模型 64 卡扩到 400 卡出现超线性加速。</p>
+  <div class="links">
+    <a class="cn" href="pages/zero-memory-optimizations.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/html/1910.02054v3">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">训练核心流程</span><span class="tag">显存优化</span><span class="tag">并行策略</span><span>收藏于 2026-10-27</span></div>
 </div>
 
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
