@@ -136,6 +136,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">训练核心流程</span><span class="tag">显存优化</span><span class="tag">并行策略</span><span>收藏于 2026-10-27</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">25</span>《Megatron-FSDP》（NVIDIA Megatron Core 开发者指南）</h3>
+  <p>原生 PyTorch 的高性能 FSDP 实现：DDP 全归约拆成梯度归约散射、分布式优化步与参数全收集；FSDP 单元模块定粒度，模块钩子实现按单元周期的解分片与重分片；DDP、ZeRO-1/2/3、HSDP、HFSDP 同一套机制，HFSDP 内层 ZeRO-3、外层 ZeRO-1；双缓冲限并发未分片单元为 2 个，MaxPool 处理非对称架构，非均匀分片 + LCM 分区保连续性与局部性；NCCL 用户缓冲区注册零拷贝，对称内存 + SHARP 把单通信算子 SM 占用从 16-32 降到 1-6。</p>
+  <div class="links">
+    <a class="cn" href="pages/megatron-fsdp.html">中文精读 →</a>
+    <a class="en" href="https://docs.nvidia.com/megatron-core/developer-guide/nightly/user-guide/features/megatron_fsdp.html">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略</span><span class="tag">训练框架</span><span>收藏于 2026-10-28</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
