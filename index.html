@@ -43,6 +43,16 @@
 <h2><span class="stars">⭐⭐⭐⭐⭐</span> 核心必读</h2>
 
 <div class="card hot">
+  <h3><span class="n">26</span><a href="pages/megatron-fsdp.html">Megatron-FSDP 中英对照版</a></h3>
+  <p>NVIDIA 原生 PyTorch 的全分片数据并行实现：按 FSDP 单元模块做非均匀分片，双缓冲/MaxPool 分配器 + NCCL 对称注册与 SHARP 把 SM 占用压到 1–6；HFSDP 用「ZeRO-1 over ZeRO-3」在显存与通信间折中。含 12 张技术图与 5 张配置对照表。</p>
+  <div class="links">
+    <a class="cn" href="pages/megatron-fsdp.html">中英对照全文 →</a>
+    <a class="en" href="https://docs.nvidia.com/megatron-core/developer-guide/nightly/user-guide/features/megatron_fsdp.html">原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">显存优化</span><span>收藏于 2026-10-28</span></div>
+</div>
+
+<div class="card hot">
   <h3><span class="n">01</span><a href="https://abcdabcd987.com/2026/09/07/no-pp/">如何不造出另一个 Megatron（一）：流水线并行是怎么污染整个训练框架的</a></h3>
   <p>PP 是"最不一样"的并行：直接把计算图沿层切开，概念泄漏到框架每个角落。气泡调参大战（GPipe → 1F1B → Zero Bubble → DualPipe）；后训练动态输入让 torchtitan 的固定调度溢出；序列填充 <code>[B,S]</code> vs <code>[T]</code> 之争（padding 浪费、不优雅、Unsloth loss bug）；torchtitan 的控制流分叉、模型手术（<code>setattr</code> 裁剪）、类型系统失效。结论：NVL72 + MoE 时代，PP 可以删掉——连 <code>PP=1</code> 的代码都不该留。</p>
   <div class="links"><a class="cn" href="https://abcdabcd987.com/2026/09/07/no-pp/">中文原文直达 →</a></div>
