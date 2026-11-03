@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>如何训练智能体集群：RLCR 与集体推理扩展 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>如何训练智能体集群：RLCR 与集体推理扩展</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.gr.inc/blog/how-to-train-a-swarm">https://www.gr.inc/blog/how-to-train-a-swarm</a></div>
+<h1>如何训练智能体集群：RLCR 与集体推理扩展（General Reasoning，2026-11）</h1>
+<p><strong>原文</strong>：https://www.gr.inc/blog/how-to-train-a-swarm
+<strong>主题</strong>：强化学习训练方法、并行策略（集体推理扩展）
+<strong>星级</strong>：4⭐（训练方法论核心，智能体集合体方向）</p>
+<h2>一句话要点</h2>
+<p>训练智能体集合体的关键不在堆更多智能体，而在激励设计：用延迟压力让并行工作变划算、用简单的沟通原语让协作学得会、用奖励曲线之外的三组生命迹象判断学没学到并行本身。</p>
+<h2>核心问题</h2>
+<p>推理模型解决了可靠性问题，但串行本质带来高延迟，对长周期任务构成障碍。并行推理的希望是分工：单个智能体仍可串行推理，整个集合体并行工作、避开串行瓶颈。但任务奖励里没有任何显式条款激励并行，设置必须通过让更快的工作得到回报来激励并行。</p>
+<h2>RLCR 配方</h2>
+<p>General Reasoning 公开的训练智能体集合体配方（从集体奖励中强化学习）：</p>
+<ul>
+<li><strong>共享策略</strong>：全部智能体共用一个策略。</li>
+<li><strong>扁平的集体优势</strong>：对全部智能体使用同一条优势信号。</li>
+<li><strong>延迟压力</strong>：用时间上限施压，激励协作。</li>
+</ul>
+<p>目标称为<strong>集体推理扩展</strong>：智能体把有用功并行铺开，达成目标所需的沟通也随之扩展。</p>
+<h2>延迟压力的两种做法</h2>
+<p><strong>显式延迟惩罚</strong>：R(τ) = R_task(τ) − β × p(q) × T(τ) / T_max。T(τ) 是 rollout 的墙钟时间，T_max 是时间上限，p(q) 是任务平均通过率，β 是惩罚强度。DeepSeek-V4.1-Flash 的智能体团队用过这类技术，但未公开函数形式。缺点：可能与推理努力负面交互；不清楚是否希望在全部长度上施压；比值在不同任务间变化大、高度依赖 T_max。</p>
+<p><strong>时间上限（Avalon-M1 采用）</strong>：T_max 作为唯一的延迟压力来源。rollout 触及上限时取截至当时的总回报作为回报，激励策略在上限前尽可能多取得进展。时间表随训练提高（约 200 步时上限略超 5 小时），让集合体有时间收回协调的初始成本。配合<strong>随时可停的回报环境</strong>（anytime-return）：任何时刻停止 rollout 都能度量中间进展，如通过的测试数、交易回报；上限处停止一组 rollout，奖励相对回报更高的。截止时间与显式惩罚的区别：截止时间前取得相同回报的两次 rollout 得分相同，哪怕一次完成得更早。</p>
+<h2>沟通原语</h2>
+<p>核心原语是智能体间的直接消息与公开频道（消息板）；issue 板与知识档案是可选但常见的界面。首要目标是保持原语简单，让智能体自己发现协作方式，预先强加的结构可能阻碍发现更好的协作方式。</p>
+<p>三者对比：</p>
+<table>
+<thead>
+<tr>
+<th>系统</th>
+<th>训练方式</th>
+<th>沟通方式</th>
+<th>规模</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kimi K2.5 Agent Swarm</td>
+<td>只训练编排器，子智能体冻结</td>
+<td>编排器到子智能体、结果返回</td>
+<td>K2.6 最多 300 子智能体</td>
+</tr>
+<tr>
+<td>GR Avalon-M1</td>
+<td>每个智能体都在同一个集体奖励上训练</td>
+<td>任何人经频道、直接消息、档案对话</td>
+<td>CEO 加最多 8 名专家</td>
+</tr>
+<tr>
+<td>OpenAI（纳维-斯托克斯系统，按描述）</td>
+<td>未公开（部署的智能体远少于此）</td>
+<td>只在组内、不跨组；公告板是作者的假设</td>
+<td>给出解的小组约 10,000 个智能体</td>
+</tr>
+</tbody>
+</table>
+<h2>生命迹象：三组度量</h2>
+<p>奖励曲线之外，度量三件事：</p>
+<ol>
+<li><strong>有用功</strong>：每个作用于环境的回合的输出与推理 token（运行命令、编辑文件、运行测试），对照环境平均有用功。Avalon-M1 里 5 到 8 hire 的集合体起步低于平均，到第 200 步接近平均的 2 倍。</li>
+<li><strong>沟通量</strong>：随训练推进，智能体在沟通上花的算力上升；按 rollout 时长归一化后，归一化性能、总推理算力与沟通强度一起上升。沟通量本身还不能证明其有用性。</li>
+<li><strong>更早拿到可比分数</strong>：等 token 预算下，单智能体基线耗时是集合体的 4 倍；EdgeBench 长周期工作上，8 hire 组织在约 2.4 小时派生延迟处反超单智能体基线。</li>
+</ol>
+<h2>悬而未决的三个问题</h2>
+<ul>
+<li><strong>乡村问题</strong>：Avalon-M1 训练的组织最多 9 个智能体，部署时已达数百、数千个。训练在乡村、部署在城市，小规模到大规模的泛化规律未知。</li>
+<li><strong>不安三角</strong>：扁平的集体优势是粗糙信号；长周期与共享奖励让信用分配更难；跨多环境训练让每个任务家族的样本更少。回合长达数小时、有时数百万 token，单条优势覆盖了大量与结果无关的 token。</li>
+<li><strong>共享环境</strong>：当前配方里不同 rollout 相互隔离；更开放的场景可让 rollout 把工作共享给未来世代（如发表论文、代码库），但按每回合回报计算，只在后续回合受益的贡献得不到信用。</li>
+</ul>
+<h2>与既有知识的连接</h2>
+<ul>
+<li>推理扩展的激励设计教训（o1、DeepSeek-R1、Open-Reasoner-Zero 的 GAE λ 消融：λ=1 变长、λ=0.95 约 50 步内塌缩）是理解延迟压力设计的背景：超参数与设置细节决定扩展模式是否出现。</li>
+<li>与 SGLang HiCache 篇的并行策略互补：HiCache 是单系统内的并行与缓存组织，RLCR 是多智能体间的并行组织；两者都围绕“算力组织方式决定收益”展开。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
