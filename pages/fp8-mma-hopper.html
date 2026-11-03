@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hopper FP8 MMA 内幕：截断、舍入与累加器提升 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Hopper FP8 MMA 内幕：截断、舍入与累加器提升</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://simonveitner.substack.com/p/internals-of-fp8-mma-on-hopper">https://simonveitner.substack.com/p/internals-of-fp8-mma-on-hopper</a></div>
+<h1>Hopper FP8 MMA 内幕：截断、舍入与累加器提升（Simon Veitner，2026-11）</h1>
+<p><strong>原文</strong>：https://simonveitner.substack.com/p/internals-of-fp8-mma-on-hopper
+<strong>主题</strong>：GPU Kernel 优化、低精度量化（FP8）、Tensor Core
+<strong>星级</strong>：4⭐（Kernel 核心技术，FP8 数值行为）</p>
+<h2>一句话要点</h2>
+<p>Hopper FP8 MMA 需要提升累加器，根源在两处硬件行为：截断随累加器量级移动，舍入固定丢掉尾数低 10 位；提升解决前者，Blackwell 用 F 等于 25 的截断、向零舍入与硬件块缩放同时修掉两者。</p>
+<h2>两处不精确</h2>
+<p>张量核算法里有两处不精确的来源：</p>
+<ol>
+<li><strong>截断</strong>：离各分项与累加器最大指数足够远的位，在求和之前被丢弃。</li>
+<li><strong>舍入</strong>：Hopper 的特殊格式把 F32 尾数最低 10 位全部写零，而这 10 位原本可以容纳 23 位尾数里的信息。</li>
+</ol>
+<p>逐位 MMA-Sim 模型把这两处建模出来（L 等于 32，F 等于 13）：先按最大指数对齐并截断（fda），再向零舍入到 E8M13（rho）。模型与真实 GPU 内核的输出比特级一致（H100 与 H200 结果相同），两组验证值 257.1875（0x43809800）与 225.0（0x43610000）全部对上。</p>
+<h2>朴素用法的问题：累加器越长越大</h2>
+<p>FP8 MMA 的指令宽度是 32，一条指令本质上执行 32 项点积，点积与已经存在的累加器融合。执行一串指令时，累加器量级持续增长，一段时间后主导最大指数；想往里加小项时，截断点随累加器量级移动，求和丢掉大量小值。</p>
+<h2>提升与块缩放</h2>
+<p><strong>提升（promotion）</strong>：DeepGEMM 仓库也在用的技术，每 n 个指令项把累加器加进一个独立的 FP32 寄存器，然后清零、从头开始累加，防止累加器越来越大、截断点越移越靠左。</p>
+<p><strong>块缩放</strong>：Hopper 硬件不支持块缩放，必须手动做，做法是在把累加器提升到更高精度操作时，把对应缩放因子的乘法折进去。</p>
+<h2>即使每次都提升，仍有差距</h2>
+<p>提升不是每个 K 操作都做：DeepGEMM 的提升步长是 128 K，也就是 4 次 WGMMA 操作。即使每次指令后都提升，仍然会观察到精度差异，原因是舍入丢掉累加器尾数的最后 10 位。这是 Hopper 硬件的限制。</p>
+<p>Blackwell 的修复是三处一起：截断在 F 等于 25，F32 累加器向零舍入，直接通过硬件提供块缩放，用户不再需要手动实现。</p>
+<h2>实测误差</h2>
+<p>输入服从均匀分布或正态分布，对照等价 FP8 值的高精度 FP64 矩阵乘法：即使每 128 K 提升一次，也达不到 Blackwell 上可用的数值精度。</p>
+<p>K 等于 16384 的正数数据上：链式 B200 相对误差 6.05e-6，H200 链式 2.49e-1、提升后 4.96e-4。Blackwell 不做任何提升就比做 DeepGEMM 式提升的 Hopper 准确约两个量级。B200 的误差仍随 K 增长（每条指令都向零舍入到 FP32），但始终远低于 Hopper。</p>
+<h2>与既有知识的连接</h2>
+<ul>
+<li>与 Blackwell NUMA 篇的 DeepGEMM 内容互补：那边讲指针追逐定 SM 归属与亲和调度，这边讲 FP8 MMA 本身的数值行为与提升策略；两者合起来是 DeepGEMM 在 Hopper/Blackwell 上达到精度的完整拼图。</li>
+<li>低精度量化方向：FP8（E4M3）不是免费午餐，硬件的截断与舍入行为决定了缩放与提升策略必须写进内核，不能只靠数学公式。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
