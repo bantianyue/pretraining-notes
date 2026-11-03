@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang HiCache 跨并行与分布式服务 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang HiCache 跨并行与分布式服务</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving">https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving</a></div>
+<h1>《SGLang HiCache 跨并行与分布式服务》· 中文精读</h1>
+<blockquote>
+<p>原文：https://www.lmsys.org/blog/2026-11-02-hicache-distributed-serving（英文，LMSYS 博客，2026-11-02 发表）
+精读日期：2026-11-03 ｜ 主题：并行策略（推理）× KV 缓存 × 分布式服务 ｜ ⭐⭐⭐⭐</p>
+</blockquote>
+<h2>一句话总览</h2>
+<p>HiCache 把前缀 KV 复用从 GPU 显存延伸到主机内存与外存之后，还必须在真实生产部署里跨并行方式工作：上下文并行分片页归属、流水线并行同步缓存决策、推测解码恢复 draft 状态、跨拓扑共享 KV 布局、P/D 分离复用 decode 侧前缀。贯穿全文的判据只有一条：缓存命中只有在所需状态已经就绪可用时才真正省算力，否则命中率数字再高也换不来延迟下降。</p>
+<h2>要点速览</h2>
+<ul>
+<li><strong>CP 页分片</strong>：各 rank 共用同一棵逻辑基数树，页按逻辑 ID 取模归属到固定 rank；备份与恢复都保住归属，逐层 gather 前先等本层恢复完成。</li>
+<li><strong>PP 缓存同步</strong>：pp_sync 让各 stage 消费同一段传输完成确认；外存路径以后台线程算出的最小命中长度与最小完成长度定共同缓存前缀。</li>
+<li><strong>推测解码</strong>：Packed 把 draft 层追加到目标主机池共享槽映射，Sidecar 保持独立池并从声明源头派生下标；两路都随目标前缀一起恢复。</li>
+<li><strong>统一 KV 布局</strong>：按层与 head 分块成共享 L3 对象，TP4/PP2 写方与 TP2/PP1 读方从同一批对象组装各自的分片。</li>
+<li><strong>P/D 解码侧复用</strong>：decode 侧 radix 树匹配前缀并在本地恢复，prefill 只传缺失后缀；12K 提示的远端传输从 12K 降到 4K。</li>
+<li><strong>生产数字</strong>：科大讯飞 Astron MaaS 部署接入 HiCache 后命中率从 30% 升到 95%，中位 TTFT 降到 3 秒以下；CP 分片对比里主机服务 token 减少 81.2%。</li>
+</ul>
+<h2>生产背景</h2>
+<p>Agent 负载反复发送很长、基本不变的历史。Radix 缓存复用显存里的前缀 KV，HiCache 把复用延伸到主机内存与外存。但在生产服务里，复用还必须跨并行方式、推测解码与 prefill-decode 分离工作：各 rank 的缓存决策要一致，draft 状态要能恢复，本地缓存复用与远端 KV 传输要协同。科大讯飞 Astron MaaS 团队的部署同时用流水线并行、P/D 分离与 MTP，服务 GLM-5.1/5.2 CodingPlan 负载，请求输入通常在 30K 到 200K token 之间，个别达到 1M。</p>
+<h2>CP × HiCache：页分片</h2>
+<p>上下文并行把 prefill 计算分到各 rank，但 KV 缓存仍可能在各 rank 上各存一份。页分片去掉重复副本，同时保留每个请求统一的逻辑视图。请求 A/B/C 与 A/B/E 共享 A/B 前缀节点，每个 CP rank 维护同一棵逻辑基数树与相同的逻辑页 ID。两个 rank 时，偶数页归 rank 0，奇数页归 rank 1；rank 0 在本地页 1、2、3 存放 A、C、E，rank 1 在本地页 1 存放 B。</p>
+<p>页归属由纯算术确定，不需要逐页查表。设分片 rank 数为 N，页大小为 p token，逻辑槽位为 x，则逻辑页 ID q 等于 x 除以 p 向下取整，归属 rank r 等于 q 对 N 取模，本地行 ℓ 等于 q 除以 N 向下取整再乘以 p，加上 x 对 p 取模。扩展前缀时分配器沿归属顺序继续，树记录归属轮转，不兼容轮转的插入会被拒绝。</p>
+<p>读取分片 KV 时，每层先做一次 all-gather：各 rank 贡献自有页加填充页，得到按归属排序的缓冲，页表映射让 attention 按逻辑顺序读取。两个临时缓冲在层间轮换，下一层 gather 与当前层计算重叠；支持的配置上 gather 走 GPU 拷贝引擎而不是 NCCL SM 内核。</p>
+<p>HiCache 备份与恢复时保住归属：rank 0 备份 A 与 C，rank 1 备份 B，重载时按同样的归属分配 GPU 页。gather 流等本层恢复完成事件，attention 再等 gather 好的缓冲，顺序固定为恢复本地页、gather 前缀、跑 attention。</p>
+<p>实测用 GLM-5.2-NVFP4、TP4/CP4、EAGLE MTP、静态显存占比 0.9，对比开源 CP 分片 HiCache 与 GPU 复制 KV 的基线。分片后 GPU 命中率从 42.83% 升到 83.31%，主机命中率从 50.27% 降到 9.62%，合计保持在 93% 附近；主机服务 token 从 1.712B 降到 0.322B，prefill 排队均值从 14.64 秒降到 6.42 秒，前向均值从 3.15 秒降到 2.16 秒。</p>
+<h2>PP × HiCache：缓存操作一致</h2>
+<p>流水线并行按层分 KV，每个 stage 维护自己的基数树。只用 GPU 缓存时，各 stage 从相同状态出发、按相同顺序执行相同操作，结果自然一致。HiCache 加入异步传输与外存读取后，结果会影响缓存记账与后续调度，各 stage 必须在流水线里的对应点上应用这些结果。</p>
+<p>主机缓存的不一致从独立判断传输完成开始：PP0 看到 A 完成、B 在途，PP1 到达检查点时 A、B 都已完成，各自处理全部就绪项会让锁与逐出资格分叉。pp_sync 让 PP0 先在 TP 组内归约就绪数量，再沿流水线往下传，后面的 stage 接收并照此消费，不再自己定。每个选中确认项的 finish_event.synchronize() 必须在更新缓存记账之前完成。</p>
+<p>外存路径的分歧是各 stage 加载页数不同。后台线程读取前取最小外存命中长度定共同缓存前缀，读取中取最小完成长度，把慢读或失败读算进去，进度更新按序放进确认队列。调度器按相同顺序消费：PP0 定消费几个确认项并经 pp_sync 下传，后面的 stage 消费同样的项，把更新的项留给下一次检查。</p>
+<h2>推测解码：draft 状态一起恢复</h2>
+<p>前缀命中让目标模型跳过 prefill，但 draft 模型仍需要这段前缀背后的历史。只恢复目标 KV 会让 draft 缺状态，推测接受率下降。Packed 把兼容的 draft 层追加到对应的目标主机池，共享槽映射，同时保留独立的 GPU 池，要求行形状、数据类型与 token 索引兼容。Sidecar 保持独立的主机池与负载布局，传输下标从声明的源头派生，例如目标 KV 或 SWA。两条路径都随目标前缀备份与恢复 draft 状态，并把所需拷贝计入传输完成事件。</p>
+<h2>统一 KV 布局：共享存储表示</h2>
+<p>生产服务按上下文长度或延迟要求分桶，短上下文桶跑 TP2/PP1，长上下文桶跑 TP4/PP2。对话变长换桶后前缀大部分相同，绑死在写方 rank 与本地布局上的 KV 无法直接复用。统一布局把每个 token 页按共享的层与 head 边界切块：60 层、8 个 KV head 的模型，每个 chunk 覆盖 30 层与 2 个 head，每个 token 页产生 8 个对象；TP4/PP2 写方每 rank 贡献一个对象，TP2/PP1 读方每 rank 需要 4 个对象。</p>
+<p>对象用 token 前缀与全局坐标标识，命名空间包括模型、逻辑 KV 数据类型、页大小、复制模式、分区网格与对象布局。MHA 布局轴为页、head 组、层、K/V、页内 token、组内 head、head 维，同一 head 组内每层的 K 与 V 先存放在一起；MLA 布局轴为页、层、页内 token、维。备份时 GPU 重排内核把选中的页按这个顺序打包进暂存缓冲，再拷贝到 pinned 主机内存。当前统一 L3 路径支持文件后端与单个 MHA 或 MLA KV 池，CP 支持限于整页副本。</p>
+<h2>P/D × HiCache：解码侧前缀复用</h2>
+<p>prefill worker 上的命中省了计算，但 decode worker 在生成 token 之前仍需要对应的 KV。decode 侧 radix 树保留 earlier 请求的 KV 并匹配新提示，HiCache 把复用延伸到主机内存，前缀离开 GPU 后仍可复用。12K 提示分三段 4K：A 已在 decode GPU 上，B 在 decode 主机池里，C 缺失；树匹配到 8K 前缀，decode 本地恢复 B，只从 prefill 接收 C，远端传输从 12K 降到 4K。</p>
+<p>每个请求，decode 锁定 GPU 常驻前缀，为本地恢复的 KV 与 incoming 后缀预留 GPU 空间，把可复用边界以 decode_prefix_len 报给 prefill。prefill 只发边界之后的 KV，自己的前缀缓存独立决定能跳过多少计算。本地恢复与远端接收都必须在解码开始前完成；恢复给不出承诺的前缀时请求会失败。</p>
+<p>多轮复用实测用 GLM-5.2-FP8、每 worker 8 张 B300、TP8/EP8，32 路对话跑 86 轮，共享 32K 初始前缀，最终上下文 160K。两层复用全开后平均 TTFT 从 2.07 秒降到 1.54 秒，中位 TTFT 从 0.681 秒降到 0.271 秒，输出吞吐提高 2.9%。</p>
+<h2>调试：rank_consensus_checker</h2>
+<p>各 rank 完成缓存传输的时刻不同，但仍要在可复用前缀多长这类决策上达成一致。决策分叉的可见症状可能是后面的形状不匹配或者集合通信挂起。rank_consensus_checker 按逻辑顺序比较各 rank 选定的调度器调用与返回值，包括在不同时刻到达同一操作的 PP stage。开启方式是在每个调度器进程启动前设置环境变量 SGLANG_ENABLE_RANK_CONSENSUS_CHECKER=1，再重放出故障的负载。报出首次分歧后，调用顺序不同指向调度或缓存事件消费问题，参数不同指向更早的状态不一致，输入相同但结果不同时检查缓存操作本身。</p>
+<h2>与已有知识的连接</h2>
+<ul>
+<li>与 SGLang HiCache 三层缓存（GPU/主机/外存）互补：那篇讲层与层之间的分工与传输策略，这篇讲分层缓存放到多并行与分布式拓扑里时，归属、顺序与一致性如何保住。</li>
+<li>与 CP/PP 并行策略互补：训练侧的 CP 切序列、PP 切层，到了推理侧变成 KV 页归属与 stage 缓存记账问题，解法从计算切分转向状态一致性。</li>
+<li>工程启示：缓存系统的正确性接口是决策一致性，而不是命中率本身；pp_sync、最小值共识、decode_prefix_len 都是把“各自判断”收敛成“同一个判断”的机制。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
