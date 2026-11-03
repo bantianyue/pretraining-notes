@@ -318,6 +318,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">强化学习</span><span class="tag">并行策略</span><span class="tag">智能体集合体</span><span>收藏于 2026-11-03</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">26</span>《Hopper FP8 MMA 内幕》截断、舍入与累加器提升</h3>
+  <p>截断随累加器量级移动，舍入固定丢掉 F32 尾数低 10 位；逐位 MMA-Sim 模型（L 等于 32、F 等于 13）与 H100/H200 内核输出比特级一致；指令宽度 32 的点积与累加器融合，指令链越长截断点越左移；DeepGEMM 式提升每 n 项存入独立 FP32 寄存器并清零，块缩放手动折进提升步骤；即使每次都提升仍有差距，Blackwell 用 F 等于 25 的截断、向零舍入与硬件块缩放同时修复；K 等于 16384 时 B200 链式误差 6.05e-6，H200 链式 2.49e-1、提升后 4.96e-4，约两个量级差距。</p>
+  <div class="links">
+    <a class="cn" href="pages/fp8-mma-hopper.html">中文精读 →</a>
+    <a class="en" href="https://simonveitner.substack.com/p/internals-of-fp8-mma-on-hopper">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">GPU Kernel 优化</span><span class="tag">低精度量化</span><span class="tag">Tensor Core</span><span>收藏于 2026-11-03</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
