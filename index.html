@@ -348,6 +348,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">GPU Kernel 优化</span><span class="tag">低精度量化</span><span class="tag">Tensor Core</span><span>收藏于 2026-11-03</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">27</span>《NVIDIA 生物基础模型高效 MoE 训练》GroupedLinear、MXFP8 与融合 kernel</h3>
+  <p>MoE 只激活少数专家，容量与算力解耦；Transformer Engine 用 GroupedLinear 分组提交、MXFP8 块缩放、融合 kernel 三件套收掉专家切碎、显存、量化转换三处开销；GroupedLinear 把多专家线性变换一次提交（split_sizes 传每专家 token 数）；MXFP8 每 32 个值共享一个 E8M0 缩放因子，Blackwell 硬件加速；Sequential API 把 GroupedLinear → ScaledSwiGLU → GroupedLinear 融成 ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8；Mixtral-8x7B 在 8 张 B200 上 9,050 tokens/s/GPU，是 Hugging Face 基线 4,096 的 2.21 倍；融合 MXFP8 GroupedMLP kernel 必须 Blackwell GPU。</p>
+  <div class="links">
+    <a class="cn" href="pages/nvidia-efficient-moe-training-bio.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.com/blog/efficient-moe-training-for-biological-foundation-models/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">MoE 架构</span><span class="tag">Kernel 优化</span><span class="tag">低精度量化</span><span>收藏于 2026-11-06</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
