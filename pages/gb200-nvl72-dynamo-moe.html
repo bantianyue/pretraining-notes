@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GB200 NVL72 与 Dynamo 如何提升 MoE 推理性能 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>GB200 NVL72 与 Dynamo 如何提升 MoE 推理性能</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.cn/blog/how-nvidia-gb200-nvl72-and-nvidia-dynamo-boost-inference-performance-for-moe-models/">https://developer.nvidia.cn/blog/how-nvidia-gb200-nvl72-and-nvidia-dynamo-boost-inference-performance-for-moe-models/</a></div>
+<h1>GB200 NVL72 与 Dynamo 如何提升 MoE 推理性能 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://developer.nvidia.cn/blog/how-nvidia-gb200-nvl72-and-nvidia-dynamo-boost-inference-performance-for-moe-models/">NVIDIA GB200 NVL72 和 NVIDIA Dynamo 如何提升 MoE 模型的推理性能</a>（NVIDIA 技术博客，中文站，2025-06）
+收藏：2026-11-06，星级 4⭐（重点阅读：推理优化 / MoE 推理架构）
+主题：并行策略（推理）/ 推理优化 / MoE 架构
+方法：高保真数据中心级 GPU 性能模拟器，数十万个设计点（模拟结果，非实测）</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>Dynamo 的分解服务（预填充与解码分离、速率匹配、Planner 自动扩缩）加 GB200 NVL72 的 72 卡 NVLink 大域（130 TBps All-to-All），让 DeepSeek R1 在中等延迟下吞吐提升 6 倍，Llama 70B 在同样中延迟下提升最高 3 倍；关键是解码用宽专家并行（每 GPU 约 4 位专家、64 卡容纳全部 256 位路由专家），而宽 EP 只有在大 NVLink 域里才跑得动。</p>
+<h2>MoE 推理为什么需要新架构</h2>
+<p>最新一批开源大语言模型采用 MoE 架构（DeepSeek R1、Llama 4、Qwen3）：推理期间只激活专家参数的子集，选择性激活减少计算开销、缩短推理时间、降低部署成本。</p>
+<p>但 MoE 的专家路由是多对多通信：DeepSeek R1 每个 token 发给 256 位专家里的 8 位，选定的专家各自算完再经 all-to-all 交换输出。解码阶段在宽 EP 下表现最佳（每 GPU 只托管少量专家，计算分配更均匀、延迟更低，同时 KV 缓存空间更大、每批请求更多），而宽 EP 要求所有专家在同一低延迟、高带宽域里——这正是 GB200 NVL72 的用武之地。</p>
+<h2>分解服务：预填充与解码分开优化</h2>
+<p>自 BERT（2018）以来模型权重增长 1000 多倍，生成式推理的吞吐量与交互预期只增不减，常见做法是用 TP、PP、DP 跨多卡分片模型。</p>
+<p>传统部署把预填充与解码托管在同一 GPU 或节点上，但两者资源需求不同：令牌并行的预填充与自回归解码的 SLA 各不相同（TTFT 对预填充、ITL 对解码），每个阶段受益于不同的模型并行选择；共置导致资源利用效率低下，尤其对长输入序列。</p>
+<p>分解服务把两个阶段分到不同 GPU 或节点，独立优化：应用不同的模型并行策略、分配不同数量的 GPU 满足各阶段需求。MoE 引入新维度 <strong>EP（专家并行）</strong>：专家分布在各 GPU 间，与 TP、PP、DP 组合，显著扩展模型并行搜索空间。</p>
+<p>模拟结果（DeepSeek R1，数十万个并行配置）：中等延迟下，分解服务比共置实现 <strong>6 倍</strong>吞吐量提升。</p>
+<h2>Dynamo：解耦服务的自动化</h2>
+<p>NVIDIA Dynamo 是分布式推理服务框架，专为数据中心规模部署设计，简化并自动化分散式服务架构的复杂性：管理预填充与解码 GPU 之间 KV 缓存的快速传输、把请求智能路由到保存相关 KV 缓存的解码 GPU；需求超过分配容量时，用 Planner 与 Kubernetes 把整个分解设置扩展到数万个 GPU。</p>
+<p><strong>速率匹配是关键挑战</strong>：预填充与解码 GPU 之间要匹配请求速率，防止解码 GPU 等 KV 缓存时空闲、或预填充在解码主导设置中卡队列。正确的速率平衡要考虑预填充队列中的请求数、解码 GPU 中 KV 缓存内存块利用率、SLA（TTFT、ITL）。速率匹配的最优比例随目标延迟变化（模拟的延迟 SLA 曲线），ISL/OSL 因请求而异又让一致性速率匹配更复杂。</p>
+<p><strong>Planner 专用引擎</strong>自动化这个过程：评估预填充队列时间、解码 KV 缓存 GPU 显存利用率、应用 SLA，确定 GPU 资源的最佳配置；根据输入输出序列请求不断变化的模式，智能决定扩展的 GPU 类型、方向与比例。Planner 能检测工作负载在长/短 ISL 与 OSL 间的差异，决定用解码 GPU 上的传统聚合部署还是跨预填充/解码 GPU 的解服务。</p>
+<p><strong>流量模式</strong>：分解服务有利于各种 ISL/OSL 流量模式，尤其长 ISL；四种流量模式的模拟显示，disaggregation 对 prefill-heavy 流量帮助最大。</p>
+<h2>GB200 NVL72：宽 EP 的硬件底座</h2>
+<p>DeepSeek R1：每 token 发给 256 位专家里的 8 位；宽 EP 下每 GPU 约 4 位专家，需要 <strong>64 个 GPU</strong>才能在解码期间容纳全部 256 位路由专家。</p>
+<p>多对多通信的网络挑战：参与解码的每位专家必须与为同一 token 选择的其他七位专家交换数据，全部 256 位专家（以及托管它们的 64 个 GPU）必须在同一低延迟、高带宽域中运行；选定专家若在不同节点的 GPU 上，多对多通信会因 InfiniBand 等较慢的节点间协议成为瓶颈。</p>
+<p><strong>GB200 NVL72 机架</strong>：四个 NVLink 卡式（刺），5000 多根节能同轴铜缆，每个 GPU 与其他 GPU 的通信速度比先进的 Ethernet 标准快 36 倍。</p>
+<p><strong>NVLink 域</strong>：GB200 NVL72 提供 <strong>130 TBps</strong> 的 All-to-All 总带宽。对比 HGX H200 基板：单个 NVLink 域最多 8 个 GPU，每 GPU 900 GB/s；GB200 NVL72：NVLink 域支持多达 <strong>72 个</strong> NVIDIA Blackwell GPU，每 GPU <strong>1.8 TB/s</strong>，比 400 Gbps Ethernet 标准快 36 倍。</p>
+<p>模拟结果：更大的 NVLink 域有助于分解服务性能，DeepSeek-R1 受益于更高的 EP 和中延迟批处理。</p>
+<h2>密集模型同样受益：Llama 70B</h2>
+<p>GB200 NVL72 与 Dynamo 在 Llama 70B 等传统密集模型上协同工作，同样实现巨大性能提升。</p>
+<p>模拟（数百个模型并行配置）：随着 TTFT 约束收紧，tensor parallelism 必须从 2 个 GPU 扩展到 64 个 GPU；严格 TTFT SLA 下，共置与分解服务都有利于高 TP，但分解解码能更积极地实现这一策略。Dynamo 分解解码无需在计算密集的预填充性能与解码速度之间平衡，更好适应日益严格的延迟需求。GB200 NVL72 的纵向扩展架构让 TP 解码部署中的所有 GPU 以高达 <strong>260 TBps</strong> 的速度用 all-reduce 通信，在高达 <strong>3 倍</strong>的相同中延迟机制下提高吞吐量。</p>
+<h2>总结</h2>
+<p>Dynamo 与 GB200 NVL72 的组合产生强大的复合效果：Dynamo 处理预填充和解码自动缩放、速率匹配，简化并自动化 MoE 模型的解服务复杂挑战；GB200 NVL72 提供独特的纵向扩展架构，加速宽 EP 解码的多对多通信。两者共同助力 AI 工厂更大限度地提高 GPU 利用率，满足更多的每笔投资请求，推动利润持续增长。</p>
+<h2>与知识库其他条目的联系</h2>
+<ul>
+<li><strong>Anatomy of an LLM Serving Engine（5⭐）</strong>：vLLM 与 SGLang 的五层进程切分、KV 账本归属；这篇的分解服务（预填充/解码分离、KV 缓存传输）就是 L2/L3 在集群层的具体实现，Dynamo Planner 是 L5 集群层的自动化版本。</li>
+<li><strong>Kimi K3.1 Pro 首日支持（5⭐）</strong>：SGLang 在 GB300 NVL72 上的 AgentX 解耦部署（1P2D、2P1D/3P1D）与这篇的分解服务、宽 EP 是同一套思路在前沿 MoE 模型上的实测；DCP 的 NVLink 多播与这篇的 130 TBps All-to-All 域相互印证。</li>
+<li><strong>NVIDIA 生物基础模型高效 MoE 训练（4⭐）</strong>：GroupedLinear 与 MXFP8 训练侧 kernel 优化；这篇是推理侧的系统架构，EP 与 TP/PP/DP 的组合在训练与推理两侧是同一批并行策略的不同落点。</li>
+<li><strong>Together Compiler（5⭐）</strong>：持续编译的思路；这篇的模拟器评估数十万设计点，与持续编译"直接度量候选"的思路相通，都是用搜索代替手工调参。</li>
+</ul>
+<h2>关键数字备忘</h2>
+<ul>
+<li>DeepSeek R1：每 token 选 256 位专家里的 8 位；宽 EP 每 GPU 约 4 位专家，64 卡容纳全部 256 位路由专家。</li>
+<li>分解服务：DeepSeek R1 中等延迟下吞吐提升 6 倍（模拟）；Llama 70B 同样中延迟下最高 3 倍（模拟）。</li>
+<li>GB200 NVL72：72 个 Blackwell GPU，NVLink 域每 GPU 1.8 TB/s，All-to-All 130 TBps，All-Reduce 260 TBps；HGX H200 域内最多 8 卡、每卡 900 GB/s。</li>
+<li>Llama 70B：TTFT 收紧时 TP 从 2 卡扩到 64 卡。</li>
+</ul>
+<h2>公众号文章</h2>
+<ul>
+<li>草稿：NVIDIA GB200 NVL72 和 NVIDIA Dynamo 如何提升 MoE 模型的推理性能（draft.id=QAZ21DdIUv8-7B6FZA__GB1SiBc9xRECgPx-fEWmQdIih9W7qRF9sjOJWue4lHsH，2026-11-06 推送，图 10/10、h2 4/4，服务器回读全过；中文原文 .verbatim-zh 直用）</li>
+<li>本地目录：<code>~/workspace/articles/how-nvidia-gb200-nvl72-and-nvi/</code></li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
