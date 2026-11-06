@@ -378,6 +378,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">MoE 架构</span><span class="tag">Kernel 优化</span><span class="tag">低精度量化</span><span>收藏于 2026-11-06</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">28</span>《GB200 NVL72 与 Dynamo》如何提升 MoE 推理性能</h3>
+  <p>Dynamo 的分解服务（预填充与解码分离、速率匹配、Planner 自动扩缩）加 GB200 NVL72 的 72 卡 NVLink 大域（130 TBps All-to-All），让 DeepSeek R1 在中等延迟下吞吐提升 6 倍，Llama 70B 在同样中延迟下提升最高 3 倍；关键是解码用宽专家并行（每 GPU 约 4 位专家、64 卡容纳全部 256 位路由专家），而宽 EP 只有在大 NVLink 域里才跑得动；GB200 NVL72 每 GPU 1.8 TB/s、All-Reduce 260 TBps，HGX H200 域内最多 8 卡、每卡 900 GB/s。</p>
+  <div class="links">
+    <a class="cn" href="pages/gb200-nvl72-dynamo-moe.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.cn/blog/how-nvidia-gb200-nvl72-and-nvidia-dynamo-boost-inference-performance-for-moe-models/">中文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">MoE 架构</span><span>收藏于 2026-11-06</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
