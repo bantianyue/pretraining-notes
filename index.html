@@ -43,6 +43,16 @@
 <h2><span class="stars">⭐⭐⭐⭐⭐</span> 核心必读</h2>
 
 <div class="card hot">
+  <h3><span class="n">31</span><a href="pages/megatron-core-moe.html">用 Megatron Core 扩展专家混合模型训练 中英对照版</a></h3>
+  <p>NVIDIA 官方技术报告：把万亿参数 MoE 训练拆成显存墙/通信墙/计算效率墙三堵墙逐层攻破——从 Parallel Folding 打破 EP≤DP 约束，到 1F1B all-to-all 重叠把通信藏到 93%，再到无同步 kernel + CUDA Graphs 让 dropless MoE 整图入图；DeepSeek-V3 在 GB300 上做到 1233 TFLOPS/GPU。</p>
+  <div class="links">
+    <a class="cn" href="pages/megatron-core-moe.html">中英对照全文 →</a>
+    <a class="en" href="https://ar5iv.labs.arxiv.org/html/2603.07685">原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">MoE 架构</span><span class="tag">Kernel 优化</span><span class="tag">MFU</span><span class="tag">Blackwell</span><span>收藏于 2026-11-06</span></div>
+</div>
+
+<div class="card hot">
   <h3><span class="n">30</span><a href="pages/nvl72-wide-ep.html">Scaling Large MoE Models with Wide Expert Parallelism on NVL72 中英对照版</a></h3>
   <p>NVL72 上用 Wide-EP 把专家摊到 8 块以上 GPU：靠 130 TB/s NVLink 域吃掉 all-to-all，EP32 单卡吞吐比 EP8 高 1.8 倍。</p>
   <div class="links">
