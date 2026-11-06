@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM 服务引擎解剖：vLLM 与 SGLang 的五层进程切分 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>LLM 服务引擎解剖：vLLM 与 SGLang 的五层进程切分</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://hiraditya.github.io/posts/anatomy-of-an-llm-serving-engine/">https://hiraditya.github.io/posts/anatomy-of-an-llm-serving-engine/</a></div>
+<h1>LLM 服务引擎解剖：vLLM 与 SGLang 的五层进程切分 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://hiraditya.github.io/posts/anatomy-of-an-llm-serving-engine/">Anatomy of an LLM Serving Engine</a>（Aditya Kumar，hiraditya.github.io，2026-10-28 发表，2026-11-01 更新）
+收藏：2026-11-06，星级 5⭐（核心必读：推理引擎架构）
+主题：并行策略（推理）/ 推理优化 / KV Cache / 训练推理一致性
+版本：vLLM 0.32.0（提交 5df63a7）、SGLang 0.5.22（提交 baa9bef）；十篇系列第 1 篇</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>每个 LLM 服务引擎都是同样的五层（API 前端、调度器、KV 内存管理、模型执行器、集群层），vLLM 与 SGLang 的差别不在有哪几层，而在把这几层切成几个操作系统进程、以及哪个进程拥有内存；vLLM 引擎核心独掌 KV 账本、Worker 只存字节，SGLang 每个张量并行 rank 各跑一份完整引擎、靠确定性保持账本一致。</p>
+<h2>五层模型：按决策与状态划分</h2>
+<p>一层值得单独命名，当且仅当它拥有一个决策，以及这个决策需要的状态：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>决定什么</th>
+<th>拥有什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L1 API 前端</td>
+<td>一个请求是哪串 token ID，输出 token 变成什么文本</td>
+<td>对话模板、分词器、每个请求的反分词状态、停用字符串</td>
+</tr>
+<tr>
+<td>L2 调度器</td>
+<td>哪些 token 进下一次前向</td>
+<td>等待与运行队列、每步的 token 预算</td>
+</tr>
+<tr>
+<td>L3 KV 内存管理</td>
+<td>每个 token 的键值住在哪</td>
+<td>块或槽位表、空闲链表、前缀索引</td>
+</tr>
+<tr>
+<td>L4 模型执行器</td>
+<td>怎样在 L3 分配的槽位上，对 L2 挑出的批次跑一次前向</td>
+<td>权重、KV 字节、CUDA 图、编译好的 kernel</td>
+</tr>
+<tr>
+<td>L5 集群层</td>
+<td>哪个副本接这个请求</td>
+<td>每个副本的负载与缓存命中估计</td>
+</tr>
+</tbody>
+</table>
+<p>两个关键结构关系：</p>
+<ul>
+<li><strong>L2 与 L3 拆不开。</strong> 接纳一个请求就是内存决策（调度器在赌这个请求后面需要的块到时候还空着）；抢占就是把赌注撤回。PagedAttention 让赌注变得便宜（KV 按需分配成固定大小的块）。在一个引擎内部，L2 和 L3 永远坐在一起，两个引擎都把它们放进同一个进程。</li>
+<li><strong>L5 住在引擎外面</strong>（vLLM 的 llm-d、SGLang 的 Rust Model Gateway），但它需要知道 L3 知道的事，所以两个引擎都把 KV 状态往上导出，这个导出就是集群层伸回引擎的地方。</li>
+</ul>
+<p>小引擎验证：nano-vllm（1,195 行非空非注释 Python，README 称约 1,200 行）有 Scheduler、带哈希前缀缓存的 BlockManager、ModelRunner、在自己进程里做分词与反分词的 LLMEngine，没有 HTTP 服务器与集群层（离线引擎）；Mini-SGLang（5,972 行，README 称约 5,000 行）把前端放在自己的进程里，调度器和执行器按每卡一个进程放在一起。作者不同，规模差 5 倍，引擎里面还是同样的四个盒子。</p>
+<h2>总图：两卡下的进程切分</h2>
+<p>系列每篇都以这张总图开头，并标出该篇覆盖的框。每个框是一个进程，按双卡张量并行画出（两个引擎看起来不一样的最小配置）。</p>
+<ul>
+<li><strong>vLLM</strong>：引擎核心每步都把批次发给 Worker（共享内存广播）。</li>
+<li><strong>SGLang</strong>：rank 0 只把新请求发给 rank 1，每个 rank 自己算出批次。</li>
+</ul>
+<p>把五层切成操作系统进程不是表面包装。在 Python 与 CUDA 运行时里，一道进程边界同时是三道边界：<strong>GIL 边界</strong>、<strong>地址空间边界</strong>（指针传递变成序列化或共享内存拷贝）、<strong>权限边界</strong>（两张 GPU 是由一个控制器指挥，还是各自独立算出完全相同的调度）。</p>
+<h2>vLLM：引擎核心管账本，Worker 管显存</h2>
+<p>默认单 API 服务器时，<code>vllm serve</code> 进程就是 API 服务器；<code>AsyncLLM</code> 把引擎核心作为子进程启动（<code>EngineCore</code>）。引擎核心的忙循环可以写成一行：排空输入队列，然后 <code>step()</code> 依次跑 <code>scheduler.schedule()</code>、<code>model_executor.execute_model()</code>、<code>scheduler.update_from_output()</code>。</p>
+<p><strong>Worker 数量：文档与代码说法不一致。</strong> 架构总览说每个 GPU 一个 Worker 进程，总数是 A + DP + N。但 <code>ParallelConfig</code> 在 <code>world_size == 1</code> 时选 <code>uni</code> 执行后端，<code>UniProcExecutor</code> 把 Worker 建在引擎核心进程里面——单卡 <code>vllm serve</code> 是两个进程，不是三个。到 <code>-tp 2</code> 时后端变成 <code>mp</code>，<code>MultiprocExecutor</code> 派生出 <code>VllmWorker-0</code> 与 <code>VllmWorker-1</code>，数量跳到四个。</p>
+<p><strong>基准测试陷阱</strong>：TP=1 时 vLLM 的调度器和前向共享地址空间与 GIL，跟 SGLang 的布局一样；TP=2 时不再一样。传 <code>-tp 2</code> 改的是引擎的进程拓扑，不只是张量并行。单卡上采的 CPU 画像完全测不到加第二张卡才出现的引擎到 Worker 的 IPC 路径。</p>
+<p>TP≥2 时，一个请求去 GPU 的路上要跨两道进程边界，两跳用的传输方式不一样：</p>
+<ul>
+<li><strong>API 服务器 → 引擎核心</strong>：ZMQ ROUTER/DEALER 套接字收请求，PUSH/PULL 套接字回输出，线上传 msgspec 打包的 msgpack；引擎核心用两个专用后台线程跑套接字 I/O 再喂给 <code>queue.Queue</code>（释放 GIL，能把 ZMQ I/O 与 GPU 重叠，还能把部分序列化/反序列化与模型前向重叠）。</li>
+<li><strong>引擎核心 → Worker</strong>：<code>shm_broadcast.py</code> 里的 <code>MessageQueue</code>，共享内存环形缓冲，每 Worker 一个写者一个读者；引擎核心每步写一次 <code>SchedulerOutput</code>，所有 Worker 读同一份字节；每个 Worker 在自己的一对一队列上回包，只有一个 rank 返回 <code>execute_model</code> 的结果。</li>
+</ul>
+<p><strong>KV 初始化四步</strong>（<code>EngineCore._initialize_kv_caches</code>）：</p>
+<ol>
+<li>问每个 Worker：每个注意力层每 token 需要什么（全注意力、滑动窗口、MLA、Mamba 状态……），得 <code>kv_cache_specs</code>。</li>
+<li>每个 Worker 用 dummy 前向画像，报剩给 KV 的字节：<code>ceil(total * gpu_memory_utilization) - 非 KV 内存 - CUDA 图估计</code>（集合 RPC，-tp 2 时结果是每 Worker 一项的列表）。</li>
+<li>字节在这里变成块，就在引擎核心里；每个 rank 都按最小 rank 的块数裁，块 ID 4711 在所有 GPU 上指同一个槽位。</li>
+<li>只有这时 Worker 才分配：每 GPU 一块 int8 缓冲，按层看成 KV 张量；之后再跑 torch.compile 与 CUDA 图捕获。</li>
+</ol>
+<p>第 4 步之后，Worker 再也不做内存决策。引擎核心里的 <code>BlockPool</code> 拿着空闲块队列和前缀缓存查询的块哈希表；每步调度器把块 ID 随 <code>SchedulerOutput</code> 发下去（新请求走 <code>NewRequestData.block_ids</code>，长过块边界的走 <code>CachedRequestData.new_block_ids</code>）；模型执行器按 ID 指向的地方写键值。<strong>Worker 拥有内存，引擎核心决定内存的含义。</strong></p>
+<p><strong>进程边界的两个后果：</strong></p>
+<ul>
+<li><strong>KVConnector 在引擎到 Worker 的边界上劈开。</strong> 跨解耦引擎搬 KV，既要知道传哪些逻辑块（EngineCore 里的 L3 状态），又要知道 GPU 内存指针在哪（Worker 里的 L4 状态）。TP=1 之后没有单个进程同时有这两样，所以 vLLM 按角色把接口劈开（<code>KVConnectorRole.SCHEDULER</code> 与 <code>KVConnectorRole.WORKER</code>），两半每步通过 <code>SchedulerOutput.kv_connector_metadata</code> 对话；TP=1 时劈法也成立，两半共享 EngineCore 进程。</li>
+<li><strong>停用字符串在前端到引擎的边界上付往返延迟。</strong> 停用 token 便宜（EngineCore 在采样结束时立刻看到 token ID，自己就能结束请求）；停用字符串定义在文本上，只有 API 服务器里的 <code>OutputProcessor</code> 有文本，匹配到时 EngineCore 还不知道，还捏着请求的块，还可能在 abort 经 ZMQ 到达之前又调度一步。高并发部署里，模型词表允许时优先用停用 token。</li>
+</ul>
+<h2>SGLang：每个张量并行 rank 跑完整引擎</h2>
+<p>启动器在主进程里启动 <code>TokenizerManager</code>（连同 HTTP 服务器），每个张量并行 rank 一个 <code>Scheduler</code> 子进程，再加一个 <code>DetokenizerManager</code> 子进程。<code>--tp-size 1</code> 是三个进程，<code>--tp-size 2</code> 是四个（<code>--dp-size 2</code> 再加一个 <code>DataParallelController</code> 父进程）。</p>
+<p><code>Scheduler</code> 在进程内建出 Worker：<code>Scheduler</code> → <code>TpModelWorker</code> → <code>ModelRunner</code>。L2、L3、L4 在每张 GPU 上共享一个进程，选批次、分配 KV 槽位、启动 CUDA kernel 之间没有任何东西跨进程边界。</p>
+<p><strong>回报是 CPU-GPU 重叠变成 local state。</strong> <code>Scheduler.event_loop_overlap</code> 在计算流上启动第 N 批，同时在 CPU 上处理第 N-1 批的结果，而第 N 批正在 GPU 上跑；机制就是两条 CUDA 流加一个进程内 future 映射，不是序列化边界。vLLM 0.32 用默认调度器 <code>AsyncScheduler</code> 拿到类似的重叠，但 TP=1 之后必须跨共享内存环形缓冲做流水线。</p>
+<p><strong>代价是状态复制。</strong> 每个 rank 的 <code>Scheduler.__init__</code> 都建自己的 <code>ReqToTokenPool</code>、<code>TokenToKVPoolAllocator</code>、一份 <code>RadixCache</code> 前缀树。只有 rank 0 经 ZMQ 从前端收请求；请求到达时 rank 0 调用 <code>broadcast_pyobj</code>（pickle 成字节张量，经 Gloo CPU 组做 <code>dist.broadcast</code>）。入口广播之后，每步不再发批次；每个 rank 在本地的队列与基数树副本上跑同样的调度代码，靠确定性得出完全相同的批次与槽位分配。<code>rank_consensus_checker</code> 可以验证这一点，但只有打开 <code>SGLANG_ENABLE_RANK_CONSENSUS_CHECKER</code> 时才启用，默认是个空操作。</p>
+<p><strong>确定性赌注的脆弱点</strong>：一个遍历请求 ID 字符串集合的决胜逻辑就足以打破它——SGLang 用 <code>spawn</code> 方法启动调度器，每个都是全新的解释器，除非钉住 <code>PYTHONHASHSEED</code>，否则 CPython 会给每个解释器随机化字符串哈希；任何读墙钟的策略都有同样的问题。哪边都不会报错：各 rank 在集合操作里挂起，或者每个 rank 的注意力头悄悄从另一个请求那里读键。</p>
+<p>反分词放在自己的进程 <code>DetokenizerManager</code> 里（源码没给理由，按代码的读法：调度器进程处在 kernel 启动的关键路径上，每个请求的解码状态与 <code>batch_decode</code> 调用放在里面会拖慢下一次启动；单独的进程把字符串工作从调度循环与 HTTP 事件循环上都挪开）。vLLM 同样的工作放在 API 服务器的事件循环上，分块跑，中间插 <code>await asyncio.sleep(0)</code>，让大输出批次不至于饿死其他请求。</p>
+<p><strong>内存定容陷阱</strong>：两个引擎都按各 rank 里最差的那张 GPU 给 KV 池定容，但两个开关量的分母不一样：</p>
+<ul>
+<li>vLLM 的 <code>--gpu-memory-utilization</code> 是 vLLM 分配的一切的总上限；KV 拿到的是扣掉权重、画像出的激活、CUDA 图估计之后剩下的部分。</li>
+<li>SGLang 的 <code>--mem-fraction-static</code> 是只针对静态内存（权重加 KV 池）的目标份额；其余部分留作运行时 slack，<code>slack_gb = pre_model_load_memory * (1 - mem_fraction_static)</code>，KV 池拿到的是模型加载后剩下的空闲内存再扣掉这份 slack。</li>
+</ul>
+<p>同一台机器上把两个开关都设成 0.9，得不到同样的 KV 池。</p>
+<h2>谁拥有内存：两种答案</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>vLLM 0.32</th>
+<th>SGLang 0.5.22</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP=1 / TP=2 时的进程数</td>
+<td>2 / 4</td>
+<td>3 / 4</td>
+</tr>
+<tr>
+<td>TP=2 时的调度器份数</td>
+<td>1 份，在引擎核心里</td>
+<td>2 份，每 rank 一份</td>
+</tr>
+<tr>
+<td>TP=2 时的 KV 账本份数</td>
+<td>1 份</td>
+<td>2 份，靠确定性保持相同</td>
+</tr>
+<tr>
+<td>KV 字节住在哪</td>
+<td>每个 Worker 进程</td>
+<td>每个调度器进程</td>
+</tr>
+<tr>
+<td>各 rank 怎样对齐批次</td>
+<td>引擎核心每步把 SchedulerOutput 写进共享内存</td>
+<td>rank 0 广播新请求，各 rank 自己调度</td>
+</tr>
+<tr>
+<td>反分词</td>
+<td>API 服务器事件循环</td>
+<td>单独的进程</td>
+</tr>
+<tr>
+<td>内存开关</td>
+<td>--gpu-memory-utilization，总上限</td>
+<td>--mem-fraction-static，静态份额</td>
+</tr>
+</tbody>
+</table>
+<p>vLLM 在 TP 大于 1 之后每步都要付序列化与一次共享内存跳转，调度器永远碰不到 GPU 张量；SGLang 为 N 份调度器付 CPU 时间，还把正确性押在 N 个进程做出比特完全相同的决策上。</p>
+<p>作者更倾向 vLLM 的切法：KV 账本有一个单一权威 owner（每个数据并行 rank 一个），这个 owner 也是告诉集群路由器缓存了什么的天然位置——<code>BlockPool</code> 把 <code>BlockStored</code> 与 <code>BlockRemoved</code> 事件排队，打开 <code>--kv-events-config</code> 后 <code>Scheduler.update_from_output</code> 在 ZMQ PUB 套接字上发布它们。一个账本、一个事件流、一个供 llm-d 订阅的来源。SGLang 的单进程循环在单节点上更容易做快；vLLM 的切法在集群层开始问问题时更容易讲清楚。</p>
+<h2>一个请求的时间花在哪</h2>
+<p>低负载下（一次只飞一个请求，服务器在两次请求之间空闲），不用给 vLLM 打补丁就能测进程边界开销。vLLM 在 <code>vllm/v1/metrics/stats.py</code> 里的 Prometheus 直方图暴露了足够多的内部时间戳：</p>
+<ul>
+<li><code>vllm:request_queue_time_seconds</code>：第一个 SCHEDULED 减 QUEUED（引擎核心单调时间戳）。</li>
+<li><code>vllm:request_prefill_time_seconds</code>：首 token 减第一个 SCHEDULED。</li>
+<li><code>vllm:request_decode_time_seconds</code>：末 token 减首 token。</li>
+<li><code>vllm:request_inference_time_seconds</code>：末 token 减第一个 SCHEDULED（等于预填充加解码）。</li>
+<li><code>vllm:e2e_request_latency_seconds</code>：前端挂钟时间，从 <code>arrival_time</code>（对话模板渲染开始时打戳，在分词之前）到前端从 ZMQ 取出最终输出批次的那一刻。</li>
+</ul>
+<p>两个解读细节：</p>
+<ol>
+<li><strong>抢占藏在推理时间里，不在排队时间里。</strong> 代码只保留第一个 SCHEDULED 事件（带一句 <code># ignore preemptions</code> 注释），而文档写的是最近一次 SCHEDULED。一个请求生成中途被抢占、重新进等待队列再恢复，第二次等待算进预填充或解码，不算排队时间。</li>
+<li><strong>e2e 在最终反分词与 HTTP 写回之前就停表。</strong> e2e 在前端从引擎核心取出最终批次时就停表，排除了最后一次 <code>IncrementalDetokenizer</code> 处理与写 HTTP 响应。</li>
+</ol>
+<p>Prometheus 直方图把多个请求的观测聚合在一起，一次抓取报不出单个请求的延迟；但一次只飞一个请求时，每次直方图 <code>_sum</code> 在两次抓取之间的增量就是那个请求的精确观测，<code>_count</code> 的增量说明恰好落了一个观测。完整脚本是 <code>split_latency.py</code>，核心是两次 <code>/metrics</code> 抓取的差分：</p>
+<pre><code class="language-python"># 1. Prove exactly one observation landed in every histogram between scrapes.
+for m in HISTOGRAMS.values():
+    assert after[m, &quot;_count&quot;] - before[m, &quot;_count&quot;] == 1
+d = {k: after[m, &quot;_sum&quot;] - before[m, &quot;_sum&quot;] for k, m in HISTOGRAMS.items()}
+
+# 2. Input tokenization, msgpack + ZMQ both ways, and up to one step waiting
+#    for EngineCore's busy loop to drain its input queue.
+frontend_ipc = d[&quot;e2e&quot;] - d[&quot;queue&quot;] - d[&quot;inference&quot;]
+
+# 3. HTTP request parsing before rendering, final detokenization, response write, socket.
+http_detok = client_s - d[&quot;e2e&quot;]
+</code></pre>
+<p>可检验的预测：只有提示词进来的路与最终 token 出去的路坐在 <code>frontend_ipc</code> 里面，之前每个 token 都经 ZMQ 穿过去、在 API 服务器事件循环上反分词，而此时引擎核心已经在 GPU 上跑下一个前向。并发为 1 时，<code>frontend_ipc</code> 在输出长度从 1 长到 256 个 token 时应该保持平坦，只随提示词长度略微增长（分词 2,048 个 token 比 128 个花的时间长）。如果 <code>frontend_ipc</code> 随输出长度增长，说明前端的 asyncio 事件循环在并发为 1 时也跟不上引擎的解码步伐。</p>
+<p>最接近的已发表拆分是 vLLM 自己对 Llama 3 8B 在一块 H100 上的画像：HTTP API 服务器占执行时间的 33%、调度占 29%、GPU 执行占 38%。这个画像就是 v0.6.0 把 API 服务器挪进自己进程的原因（它早于上面描述的布局，对今天的残差什么也没说；但它说明前端的份额大到值得单独给一个进程）。</p>
+<h2>前端是最会动的一层</h2>
+<p>两个仓库最近的工作给出了干净的检验：两个引擎现在都发实验性 Rust 前端，而且朝相反的方向建。</p>
+<ul>
+<li><strong>vLLM 的 <code>vllm-frontend-rs</code></strong>（从 Inferact 搬进主仓库）：把北向服务层用 Rust 重建，同时仍然经 ZMQ、在已有的引擎边界上与核心 Python vLLM 引擎进程对话；架构图里的每个 crate 都映射到 L1（axum HTTP 服务器、带推理与工具解析的对话模板渲染、分词器与增量反分词器、ZMQ 加 MessagePack 的引擎客户端，<code>VLLM_USE_RUST_FRONTEND=1</code>）。进程边界留在原地，变的只是 ZMQ 套接字之上的语言。</li>
+<li><strong>SGLang 用 Rust 删掉了进程边界</strong>：打开 <code>SGLANG_RUST_SERVER=1</code> 后，嵌在 rank-0 调度器里的 Rust 服务器拥有 API 服务器、分词与反分词；按调度器源码的说法，Rust 服务器就是入口来源，请求接收器从进程内环形缓冲取数据，而不是走 ZMQ 套接字。L1 与 L2、L3、L4 合并进同一个操作系统进程，Python 的 <code>TokenizerManager</code> 与反分词子进程根本不启动。</li>
+<li><strong>Model Gateway 在 gRPC 模式下把 L1 往反方向拉，拉进 L5</strong>：gRPC 路由器在本地分词输入、支持工具调用解析、流式返回响应。</li>
+</ul>
+<p>看两个开关，SGLang 0.5.22 的 L1 可以跑在主进程里、rank-0 调度器进程里，或者网关里，每个地方用不同的实现。层的活与状态从没变过，变的是哪些层跟它共享地址空间、请求在关键路径上付几次 IPC。这就是每个引擎正在做的架构决策，也是这个系列接下来要跟的轴线。</p>
+<h2>与知识库其他条目的联系</h2>
+<ul>
+<li><strong>Together Compiler（5⭐）</strong>：持续编译的思路与服务引擎的进程切分形成对照——一个是编译期把算子融好，一个是运行期让智能体持续重写前向；两者都围绕"谁拥有状态、谁做决策"展开。</li>
+<li><strong>NVIDIA 生物基础模型高效 MoE 训练（4⭐）</strong>：GroupedLinear 与 MXFP8 是训练侧的 kernel 优化；这篇是推理侧的引擎架构，KV 账本与专家并行在训练与推理两侧是同一批概念的不同落点。</li>
+<li><strong>vLLM 上下文并行部署（4⭐）</strong>：prefill CP 与 decode CP 的设计；这篇的进程切分决定了 CP/EP 这些并行策略在推理引擎里由谁执行。</li>
+<li><strong>Kernel Optimization — Modular 手册（4⭐）</strong>：kernel fusion 把 HBM 往返从 6 次降到 2 次；服务引擎的进程边界与 IPC 开销是同一笔账在系统层的版本。</li>
+<li><strong>Prime Mega MoE（素材池）</strong>：DeepSeek 融合 MoE 内核；MoE 推理的 kernel 与服务引擎的调度、KV 管理是上下游关系。</li>
+</ul>
+<h2>关键数字备忘</h2>
+<ul>
+<li>进程数：vLLM TP=1 是 2 个、TP=2 是 4 个；SGLang TP=1 是 3 个、TP=2 是 4 个。</li>
+<li>教学实现规模：nano-vllm 1,195 行；Mini-SGLang 5,972 行。</li>
+<li>vLLM 画像（Llama 3 8B，单 H100）：HTTP API 服务器 33%、调度 29%、GPU 执行 38%。</li>
+<li>内存开关：vLLM <code>--gpu-memory-utilization</code> 是总上限；SGLang <code>--mem-fraction-static</code> 是静态份额；都设 0.9 得不到同样的 KV 池。</li>
+<li>延迟拆分：<code>frontend_ipc = e2e - queue - inference</code>；<code>http_detok = client_s - e2e</code>。</li>
+</ul>
+<h2>公众号文章</h2>
+<ul>
+<li>草稿：LLM 服务引擎解剖：vLLM 与 SGLang 的五层进程切分（draft.id=QAZ21DdIUv8-7B6FZA__GICEoOkVpg2e2TiLlDYOBuHYidCbbDYyB8jryXJKrg5v，2026-11-06 推送，图 1/1、表 3/3、代码块 2、h2 7/7，服务器回读全过）</li>
+<li>本地目录：<code>~/workspace/articles/anatomy-of-an-llm-serving-engi/</code></li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
