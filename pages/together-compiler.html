@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Together Compiler：持续编译推理引擎 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Together Compiler：持续编译推理引擎</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.together.ai/together-compiler-paper">https://www.together.ai/together-compiler-paper</a></div>
+<h1>Together Compiler：持续编译推理引擎（Together AI，2026-11）</h1>
+<p><strong>原文</strong>：https://www.together.ai/together-compiler-paper
+<strong>主题</strong>：推理优化、智能体、GPU kernel、并行策略、成本模型
+<strong>星级</strong>：5⭐（推理编译核心机制 + 智能体优化范式）</p>
+<h2>一句话要点</h2>
+<p>推理流量、模型与硬件一直在变，静态优化很快过期；Together Compiler（TKCC）让编码智能体持续重写模型前向代码，持久引擎热重载候选直接度量，24 小时内把前沿模型提速最高 2.6 倍，实验吞吐量比重启引擎的系统高 252 倍。</p>
+<h2>流量为何持续漂移</h2>
+<p>三个漂移源：地区性使用习惯、突发用量波动、用户学会新模型用法后的缓慢模式迁移。某客户 P90 输入长度 3 天内从 18k 涨到 33k，输出从 1k 涨到 1.9k，缓存命中率掉 4 个百分点；新模型发布两周后，提示词长度随 workload 从聊天转向智能体再涨 80%。模型本身也变：训练中陆续放出的检查点会让输出翻倍，流量两周内从 10K 上下文滑向 18K。流量一变，最优优化就跟着变。</p>
+<h2>随机数据上快的优化，真实流量里翻车</h2>
+<p>MoE 与稀疏注意力的执行行为依赖输入分布。随机数据比真实流量多激活 13% 到 38% 的专家；Cursor 的生产级 MoE Megakernel 在随机数据上很好，真实流量上比负载均衡版本慢 6% 到 15%。智能体按随机数据写的稀疏 top-k kernel 在随机输入上 20 微秒，真实数据里 ReLU 产生大量精确为零的分数，全部落进同一个直方图桶，二次方排序在 70K 上下文跑到 62 毫秒，端到端反而慢 1.3 倍。离线单核 benchmark 的快不等于引擎里快，数据分布保真度决定优化能不能成立。</p>
+<h2>持久引擎：启动一次，热重载候选</h2>
+<p>每测一个候选就重启引擎的系统，冷启动一次 761 秒（模型加载 265 秒、自动调优 192 秒、预填充 CUDA 图捕获 192 秒），智能体一天测不了几个想法。TKCC 把引擎启动与前向计算解耦：引擎只初始化一次，智能体把候选以前向文件提交，服务器换掉前向函数指针、重捕 CUDA 图即完成度量。实验吞吐量比重启引擎的系统高 252 倍，智能体空闲时间少 11 倍。</p>
+<p>度量分两层：快层只加载 12 层，筛掉慢 kernel、非法访存与挂起；慢层加载全部 60 层，给数据依赖强的架构提供高保真信号。快层热重载 17 秒、慢层 45 秒。双层系统比单慢层多测 8.1 倍候选（1354 对 168），找到的解还快 7.2%。方差治理同样关键：同一前向连续跑两次波动 4% 到 6%，而有效优化可能只提升 1%；拆开预填充与解码度量、调小度量层数后，波动从 6.6% 降到 2.7%。前缀缓存复用再降度量延迟 2.6 倍，多智能体通过消息板通气避免重复任务，优化速度再快 2.3 倍。</p>
+<h2>成本模型：并行配置先算再试</h2>
+<p>流量形状一变，并行配置也可能要换：专家数少的模型用小 TP 更划算，专家数一多，横跨 32 到 64 卡的 EP 才划算；并发一高通信成本被摊薄，宽 EP 占优；单用户 TPS 要求一高，可行并发下降，又回到高 TP。成本模型先剪枝（装不下权重、切不均匀、达不到 1.5 秒首 token 与 40 TPS 解码 SLA 的配置去掉），再分三层估计性能：硬件规格理论值、实测算力/访存/集合通信、实测端到端前向。三层对照能分清硬件上限与软件实现拖的后腿。</p>
+<p>模型很简洁：每层前向时间取计算时间与访存时间的最大值，再加上集合通信时间；预填充按算力瓶颈算，解码按访存算；并发取显存上限与速度上限的较小值；最后合成每芯片每分钟 token 数（TPM）。Kimi K3 生产部署上，成本模型找到的新配置把 TPS 提升最高 24%，TPM 提升最高 18%。成本模型还会随用量模式变：多 token 预测接受长度一长，最优配置从 32 卡宽 EP 滑向 64 卡宽 EP。</p>
+<h2>苦涩的教训：管得越少，智能体跑得越快</h2>
+<p>两年三代系统（Megakernel、增强版 Torch Compile/Inductor、专家管理的智能体上下文）全部被删掉，结论是管束拖后腿：中间表示表达力不够，直接给源码，智能体改写 Kimi K3 的 MLA 元数据规划 kernel，让长序列注意力拆到多个线程块上，MLA kernel 本身快 1.7 到 2.5 倍，而 FX 图连宿主侧元数据都改不了。专家知识库有害：带知识库的版本 12 小时后比不带的慢 25% 到 31%，智能体把时间花在找能复用的 kernel 上。预设策略也一样：六种专家策略集成 4.9 倍，最朴素的“让前向越快越好”集成 6.2 倍；单个朴素智能体 4.8 倍，超过每一种专家策略（3.1 到 4.5 倍）。日志数据结构：图数据库记笔记每次调用起新进程，记账占 8% 时间；改成 Markdown 笔记不到 0.5%。高频通信则相反：智能体多通气，速度快 4.7 倍。</p>
+<h2>实测成绩</h2>
+<p>Llama 1B、batch size 1 的手写 Megakernel 主场，TKCC 在 H100 与 B200 上、输出长度到 64K 的范围内最高快 1.7 倍，跑到 2100 TPS。细粒度内存分页只占前向 3.1%，起作用的是 PDL、CUDA 图与 L2 预取这类驱动层原语。</p>
+<p>前沿模型在 SemiAnalysis InferenceX 的 AgentX 基准上，Kimi K3、GLM 5.3、MiniMax M3.1-Flash、DeepSeek v4.1-Flash，横跨 B200、B300、GB300、MI355X、Trainium2，每个设置 24 小时、最多 2 个节点，提速最高 2.6 倍。低延迟档：MiniMax M3.1-Flash 在 B200 上 1111 TPS（已发表最优 633 TPS 的 1.8 倍），DeepSeek v4.1-Flash 在 GB300 上 1205 TPS。关键一步是成本模型换了并行配置：InferenceX 最优镜像用 TP4，解码是访存瓶颈，TKCC 改成 TP8，每卡权重流量减半，配上优化后的前向才拉开差距。优化还会跟着并发变：Kimi K3 的持久化 MoE 下投影在并发 22 到 78 时快 2.8% 到 5%，并发 8 时反而慢 6.6%，按当前 batch size 选择性应用。</p>
+<p>跨领域也成立：天气（AIFS-ENS 2.0、Aurora 1.5）、生物（Boltz-2、Evo 2）、时间序列（Chronos-2、Panda-72M）、PDE（Walrus、Poseidon-T）提速 1.5 到 6.4 倍，输出与原始前向逐比特一致；对照组 Claude Code 的 /goal 命令在 AIFS-ENS 2.0 上连正确解都没找到。天气模型里提速直接换精度：同样时间预算，AIFS 采样数从 4 涨到 13，温度均方根误差从 0.97 K 降到 0.94 K；Aurora 从 4 涨到 14，误差从 0.60 K 降到 0.55 K。</p>
+<h2>收束</h2>
+<p>三条原则：用分层持久引擎平衡度量吞吐量与保真度；用成本模型定上限、看穿软件实现的不成熟；少干预，把原始源码交给智能体。系统已经在线上跑了数万亿 token。智能体优化要成立，必须是持续的：流量一漂移，编译就重新开始，预算耗尽才停。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
