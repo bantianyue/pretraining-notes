@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kimi K3.1 Pro 首日支持：SGLang 推理与 Miles 强化学习 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Kimi K3.1 Pro 首日支持：SGLang 推理与 Miles 强化学习</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.sglang.io/blog/kimi-k3.1-pro-day0-support">https://www.sglang.io/blog/kimi-k3.1-pro-day0-support</a></div>
+<h1>Kimi K3.1 Pro 首日支持：SGLang 推理与 Miles 强化学习 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://www.sglang.io/blog/kimi-k3.1-pro-day0-support">Kimi K3.1 Pro: Day-0 Inference and RL Support with SGLang and Miles</a>（SGLang 博客）
+收藏：2026-11-06，星级 5⭐（核心必读：前沿模型首日推理 + RL）
+主题：并行策略（推理）/ 推理优化 / MoE 架构 / 训练推理一致性
+模型：Kimi K3.1 Pro（Moonshot AI，开源权重、原生多模态智能体模型，由 Kimi K3 经大规模 RL 后训练得到）</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>Kimi K3.1 Pro 首日就在 SGLang 上全线就绪：推理覆盖 NVIDIA、AMD、TPU、Trainium、Zhenwu 六大硬件，AgentX 在 GB300 NVL72 上从 1 会话 449 token/s 每用户做到 300 会话每卡 33,688 token/s；Miles 在 32 张 H200 上首日启动强化学习，DP 注意力把每卡 KV 从 16.9 GiB 降到 4.2 GiB，84 步后 AIME 2024 从 44.6 升到 70.0。</p>
+<h2>模型总览</h2>
+<ul>
+<li><strong>2.8T</strong> 总参数、每 token 激活 <strong>104B</strong>、<strong>1M</strong> token 上下文、文本与图像输入。</li>
+<li>93 层里 69 层是 KDA（Kimi Delta Attention）线性注意力层，24 层是读全历史的注意力层；MoE 层每 token 路由到 896 个专家里的 16 个，再加 2 个共享专家。</li>
+<li>新变化：<strong>稀疏注意力</strong>——24 层读全历史的层变成门控稀疏 MLA（DSA）层，每层里一个小索引器给每个更早的 token 打分，注意力只读前 2,048 个；<strong>混合注意力</strong>——KDA 层每个请求保持固定大小的状态。</li>
+</ul>
+<h2>AgentX 实测（GB300 NVL72，1–300 会话）</h2>
+<p>三种布局：</p>
+<table>
+<thead>
+<tr>
+<th>并发</th>
+<th>布局</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1–4 会话</td>
+<td>单台聚合服务器加 MegaKernel，单会话 8 卡 TP8 或 16 卡 TP16</td>
+</tr>
+<tr>
+<td>24–56 会话</td>
+<td>预填充-解码解耦加 Dynamo，24 卡上 1P2D，一个预填充 Worker 加两个解码 Worker，各自 TP8、DCP8、EP2</td>
+</tr>
+<tr>
+<td>160–300 会话</td>
+<td>32 或 40 卡上 2P1D 或 3P1D，两个或三个 TP8·DCP8·EP2 预填充 Worker 喂给一个宽 EP16 解码服务器（TP16、注意力 DP2、DCP8、MegaMoE EP16）</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>DFlash2 接受长度：块大小 7 时 3.764（24–56 会话），块大小 5 时 3.508（160–300 会话）。</li>
+<li>吞吐从 1 会话时每卡 1,563 token/s 涨到 300 会话时 33,688 token/s；每用户速度从 449.0 token/s 降到 69.8 token/s。</li>
+<li>解耦部署每卡吞吐最高，聚合部署每用户速度最快。</li>
+</ul>
+<h2>多硬件首日支持</h2>
+<p>覆盖 NVIDIA Blackwell、Vera Rubin NVL72、Hopper、AMD Instinct（MI350X/MI355X）、Google TPU（TPU7x）、AWS Trainium（Trainium 2/3）、Zhenwu PPU（M890/810E）。所有首日配方都用预览镜像，尚未进正式 SGLang 发布。</p>
+<ul>
+<li><strong>AMD</strong>：单节点 8 张 MI350X/MI355X 以 TP8、DCP8、DFlash2 运行；两节点经 Mooncake 跑 1P1D 解耦。新 gfx950 kernel 覆盖混合模型（HIP KDA 验证、HIP top-k 合并 DCP 分片、HIP 稀疏 MLA 预填充、从 AITER opus decode 移植的 MXFP8 稀疏 MLA 解码、MoE 的 A8W4 分组 GEMM）；低并发时 sgl-amd-mono 的 MegaKernel 把解码与验证跑成持久 kernel。</li>
+<li><strong>Google TPU</strong>：16 芯 TPU7x（Ironwood）切片上一台 TP32·EP8 引擎；单个请求 8K 输入时约 133 token/s 解码，实验性 megakernel 加 DFlash 时约 590 token/s。</li>
+<li><strong>AWS Trainium</strong>：SGLang 首次把开源权重模型的首日支持带到 Trainium（经 SGLang Trainium 插件，基于 TorchNeuron）；插件目前有限 beta。</li>
+<li><strong>Zhenwu PPU</strong>：首个作为 SGLang 内置硬件后端的首日支持模型。M890 用 2P1D（TP16/EP16 预填充 + TP32/EP32/DP4 解码）；810E 用 1P1D（TP16/PP4 预填充 + TP32/EP32 解码）。</li>
+</ul>
+<h2>MegaKernel 超低延迟</h2>
+<p>低延迟部署时，SGLang 把每个解码与验证步跑成 MegaKernel（与 NVIDIA 联合开发）：一步之内，每个 kernel 在前一个还没跑完时就启动，GPU 经 NVLink 交换部分结果并在 GPU 上互相发信号，all-reduce 融进周围的计算 kernel，GPU 不等主机就从一层走到下一层。MegaKernel 以 sgl-nvidia-mega 插件发给 GB300 NVL72 与 Vera Rubin NVL72；启动加 <code>--enable-nvidia-megakernel</code>，GB300 上再加 <code>SGLANG_ENABLE_NV_MEGA_RUNTIME_K31_GB_OPTIMIZATION=1</code>。</p>
+<p>覆盖整步：DSA（索引器、top-2,048 选择、稀疏 MLA 注意力）、KDA（验证块线性注意力 + 被接受 token 的状态更新）、MoE（路由器、16 个路由 MXFP4 专家与共享专家，跨 GPU 规约融进专家 kernel）、层边界（注意力输出投影 + all-reduce、AttnRes 混合）、DFlash2（草稿模型也跑成 MegaKernel）。</p>
+<ul>
+<li>GB300 NVL72：一个 AgentX 会话 16 卡 TP16 解码 449.0 token/s 每用户，8 卡 TP8 解码 354.7 token/s（P90）。</li>
+<li>Vera Rubin NVL72：一个 AgentX 会话 16 卡 TP16 解码 741.8 token/s 每用户。</li>
+</ul>
+<h2>DFlash2 推测解码</h2>
+<p>小草稿模型读 Kimi K3.1 Pro 六层的 hidden state，一次前向提议 7 个 token，目标模型一次前向检查全部 7 个。RadixArk 训练的草稿模型有 5 层 MLA，1,024 token 滑动窗口。</p>
+<h2>并行设计：预填充（PP + PCP）</h2>
+<p>为更好满足 TTFT，预填充把流水线并行（PP）与预填充上下文并行（PCP）结合起来。</p>
+<ul>
+<li><strong>PP4 × PCP2</strong>：每个流水线 stage 用两个 PCP rank 处理同一个 microbatch 的 token 分片；不同 stage 并发处理不同的 microbatch；最后一个 stage 还放草稿模型。</li>
+<li><strong>PP</strong>：把模型层与 DSA KV 缓存切到各 stage 上；每个 stage 只存自己层的 KV，留出更多内存给并发请求。用 Kimi K3 引入的分块流水线方法：提示词分块组成 microbatch，流过各 stage；一个 stage 处理一个 microbatch 时，前一个 stage 开始下一个。</li>
+<li><strong>PCP</strong>：按轮询顺序把 token 位置交错分到各 rank，每 rank 拿序列的一个分片。KDA 收集完整分块、把注意力头分到各 rank、再把输出规约回 token 分片；DSA 让查询留在本地，同时收集新键与 KV 以访问全历史；AttnRes 在本地分片上工作，MegaMoE 用 AllToAll 把 token 路由到专家再返回结果。</li>
+<li>预填充 Worker 也支持 <strong>DCP</strong>（解码上下文并行）：在每个 DSA 层用 AllGather 重建批次的完整 KV 历史再调注意力 kernel；DSA 层比 KDA 层少，现代 NVLink 上这笔通信成本可接受。PP 与 PCP 都配合 HiCache（可复用前缀存主机内存与外部存储）；PCP 目前只切计算，DSA KV 在 CP 组内仍复制，计划加 KV 缓存分片。</li>
+</ul>
+<h2>解码：DSA 加解码上下文并行（精确合并）</h2>
+<p>用了 DSA，每个查询只看前 2,048 个 token，但 KV 缓存与索引缓存仍随上下文长度增长。DCP 把两个缓存按同样方式切到各 GPU：<strong>token p 存在 GPU p mod 8 上</strong>，每张 GPU 各拿每个缓存的八分之一。</p>
+<p>索引缓存切开后，每张 GPU 的索引器只能给自己的 token 打分，各挑本地 top 2,048。这一步不会丢 token：全局 top 2,048 里的任何 token，也在自己 GPU 的 top 2,048 里。为低成本合并：</p>
+<ol>
+<li>每张 GPU 只把最好的 384 个候选经一次 NVLink 多播写发给其他 GPU；</li>
+<li>每张 GPU 现在都有同样的 8 × 384 个候选，取其中第 2,048 好的分数作截断；</li>
+<li>某张 GPU 的第 384 个候选低于截断，说明它藏不住优胜者；某张 GPU 的 384 个候选全高于截断，说明它可能藏有优胜者，于是每张 GPU 直接经 NVLink 读它完整的本地 top 2,048，再选一次。</li>
+</ol>
+<p>结果与单卡 top-k 完全一致，每张 GPU 得到同样的选择，不用再通信一轮。每张 GPU 再对它拥有的优胜者做注意力，合并部分输出。</p>
+<h2>Miles 首日支持：32 张 H200 上做强化学习</h2>
+<ul>
+<li><strong>配方</strong>：在冻结的 MXFP4 底座上训一个 BF16 LoRA 适配器，适配器在训练器与 SGLang 里都保持为独立的 BF16 项，永不合并进底座。</li>
+<li><strong>训练并行</strong>：训练器结合 PP、TP、CP 与 EP；CP 也覆盖新的 DSA 层（每张 GPU 保留自己的查询，从 CP 组收集潜在 KV 与索引器键）。</li>
+<li><strong>DP 注意力做 LoRA rollout</strong>：TP32 注意力时，每张 GPU 拿所有运行中请求的头的一个切片；MLA 每 token 只留一个压缩 KV，不是一头一个，无法用张量并行切开——32 张 GPU 存同样的 MLA KV 与索引器键，每个注意力层结束时做一次跨 4 节点的 all-reduce。用 DP 注意力，32 张 GPU 组成每节点 8 张的 4 组，每组只给自己四分之一的请求做注意力，MoE 层仍跨全部 32 张 GPU。</li>
+</ul>
+<p>DP 注意力的两点收益：</p>
+<ul>
+<li><strong>KV 复制更少</strong>：每张 GPU 存 64 个请求的 KV 而不是 256 个；同样的 589,824 个 token 总量，KV 缓存每卡 4.2 GiB 而不是 16.9 GiB。</li>
+<li><strong>跨节点流量更少</strong>：注意力 all-reduce 留在单节点内的 NVLink 上，只有 MoE 层还跨节点交换 token。</li>
+</ul>
+<p>32 张 H200、256 个运行中请求时，一个解码步 166.6 毫秒（TP32 注意力是 202.6 毫秒）；64 个运行中请求时 DP 注意力更慢（136 毫秒对 110.5 毫秒），所以 rollout 把引擎排满时才划算。</p>
+<p>为让 LoRA 配合，SGLang 现在允许 DP 注意力下注意力 TP 大于 1：LoRA 层必须知道它的输入行是本组的请求，还是各组汇集后的全部请求。Kimi K3.1 Pro 里，注意力投影看到本组的行，dense 层、共享专家与路由专家看到全部行；模型声明这个布局，SGLang 不再要求注意力 TP 为 1。</p>
+<ul>
+<li><strong>一致性</strong>：rollout 路由重放让训练器用 SGLang 给每个 token 选的专家；DP 注意力下，一组的 GPU 共享一份索引器选择，所以读同样的 2,048 个 token；每步在同一策略版本下记录 train/rollout KL。</li>
+<li><strong>验证过的运行</strong>：DAPO-Math-17k 提示词，每步 32 个提示词各 16 个样本，rank-32 LoRA，学习率 1e-5，任务要求模型在 3,072 token 的固定预算内完成推理并作答。</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>32× H200</th>
+<th>16× NVIDIA Blackwell Ultra</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>训练器</td>
+<td>PP4 × TP4 × CP2，EP8</td>
+<td>PP2 × TP4 × CP2，EP8</td>
+</tr>
+<tr>
+<td>Rollout</td>
+<td>MoE EP32，注意力 DP4 × TP8</td>
+<td>MoE EP16，注意力 DP2 × TP8</td>
+</tr>
+<tr>
+<td>Train/rollout KL</td>
+<td>0.44 到 0.82 × 10⁻³</td>
+<td>0.36 到 0.42 × 10⁻³</td>
+</tr>
+</tbody>
+</table>
+<h2>强化学习效果</h2>
+<ul>
+<li><strong>训练曲线</strong>：奖励从前 10 步的 0.63 升到后 10 步的 0.77；train/rollout KL、对数概率 gap 与梯度范数保持平坦。</li>
+<li><strong>评估</strong>（温度 1.0，AIME 每题 16 个样本，MATH-500 每题 4 个样本）：84 步后，<strong>AIME 2024 准确率从 44.6 升到 70.0</strong>。</li>
+<li><strong>Blackwell</strong>：同样配方在 16 张 NVIDIA Blackwell Ultra 上跑（数量是 H200 的一半），15 步、4,096 token 响应的运行验证训练与 rollout 在 Blackwell 上保持一致；更多实验结果在进行中。</li>
+</ul>
+<h2>与知识库其他条目的联系</h2>
+<ul>
+<li><strong>Anatomy of an LLM Serving Engine（5⭐）</strong>：vLLM 与 SGLang 的五层进程切分、KV 账本归属；这篇是 SGLang 在前沿 MoE 模型上的首日落地，DCP/DP 注意力、MegaKernel、解耦部署都是那篇进程切分的具体应用。</li>
+<li><strong>Together Compiler（5⭐）</strong>：持续编译让智能体持续重写模型前向；这篇的 MegaKernel 与 DFlash2 是推理引擎在首日就把 kernel 融合做到位的另一条路线。</li>
+<li><strong>NVIDIA 生物基础模型高效 MoE 训练（4⭐）</strong>：GroupedLinear 与 MXFP8 训练侧 kernel 优化；这篇的 MXFP4/A8W4 推理与 Miles 的 BF16 LoRA 是同一批量化思路在推理与 RL 两侧的落点。</li>
+<li><strong>vLLM 上下文并行部署（4⭐）</strong>：prefill CP 与 decode CP 的设计；这篇的 PCP/DCP 是 SGLang 对同一问题的解法，DCP 的精确合并协议值得对照。</li>
+</ul>
+<h2>关键数字备忘</h2>
+<ul>
+<li>模型：2.8T 总参数、104B 激活/token、1M 上下文；93 层（69 KDA + 24 DSA）；MoE 16/896 + 2 共享；DSA 每层只读前 2,048 个 token。</li>
+<li>AgentX（GB300 NVL72）：1 会话 449.0 token/s 每用户 → 300 会话每卡 33,688 token/s；DFlash2 接受长度 3.764（块 7）/ 3.508（块 5）。</li>
+<li>MegaKernel：GB300 TP16 449.0、TP8 354.7 token/s 每用户；Vera Rubin NVL72 TP16 741.8 token/s 每用户。</li>
+<li>DCP：token p 在 GPU p mod 8；每 GPU 发最佳 384 候选经一次 NVLink 多播写；合并结果与单卡 top-k 完全一致。</li>
+<li>Miles：32 H200，BF16 LoRA（rank 32，lr 1e-5）+ 冻结 MXFP4；DP 注意力 KV 每卡 4.2 GiB（原 16.9 GiB）；解码步 166.6 ms（原 202.6 ms）；AIME 2024 44.6 → 70.0（84 步）。</li>
+</ul>
+<h2>公众号文章</h2>
+<ul>
+<li>草稿：Kimi K3.1 Pro 首日支持：SGLang 推理与 Miles 强化学习（draft.id=QAZ21DdIUv8-7B6FZA__GI8BaiG4v2-JnqzUB9CU2aZsy8-jje9LxY-XN-9TBzlS，2026-11-06 推送，图 8/8 含动图 1、表 1/1、h2 9/9，服务器回读全过，动图 GIF89a 9 帧）</li>
+<li>本地目录：<code>~/workspace/articles/kimi-k3-1-pro-day0-support/</code></li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
