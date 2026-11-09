@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thinking Machines Inkling 2 Small：594B MoE 全程 NVFP4 训练 — 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Thinking Machines Inkling 2 Small：594B MoE 全程 NVFP4 训练 — 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://thinkingmachines.ai/news/inkling-2-small/">https://thinkingmachines.ai/news/inkling-2-small/</a></div>
+<h1>Thinking Machines Inkling 2 Small：594B MoE 全程 NVFP4 训练 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://thinkingmachines.ai/news/inkling-2-small/">Inkling 2 Small</a>（Thinking Machines 官方博客，2026-11-05 发表）
+收藏：2026-11-09，星级 5⭐（核心必读：全程 NVFP4 预训练 + 联合 RL 的完整配方）
+主题：训练核心流程 / MoE 架构 / 低精度量化（NVFP4）/ 强化学习 / 并行策略（训练）
+模型：Inkling 2 Small（Thinking Machines 第二代模型，594B 总参数 / 17B 激活的多模态 MoE，支持图像输入与可变推理深度）</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>594B 总参数、17B 激活的 MoE，全程原生 NVFP4 在 GB300 NVL72 上 68 小时跑完 8.4T token 预训练，再经 1075 步、1700 万次以上 rollout、9 天的联合 RL（总算力超 4×10²³ FLOPs、2048 张 GPU）；FrontierCode 25.4%、DeepSWE 72.1%、SWEBench Pro Hard 86.3%、AA-Briefcase 1527 分，DesignArena 网站榜 1340 分居开源权重首位；先经 Tinker 封闭权重提供，安全测试完成后下周以 Apache 2.0 开源权重。</p>
+<h2>模型总览</h2>
+<ul>
+<li><strong>594B</strong> 总参数、每 token 激活 <strong>17B</strong> 的 MoE；Artificial Analysis 智能指数 <strong>30.6</strong>（v5.0）。</li>
+<li>原生支持图像输入（292M 参数视觉编码器，见下），不支持音频；可变推理深度。</li>
+<li>评测条件：努力程度 0.99（xhigh）、温度 1.0，单条轨迹上限 <strong>1M token</strong>（上一代 Inkling Small 为 256K）。</li>
+</ul>
+<h2>预训练四阶段：全程原生 NVFP4</h2>
+<ul>
+<li><strong>H1：8.4T token，68 小时，GB300 NVL72 机架。</strong>混合自然语言、代码与图像数据，全程原生 <strong>NVFP4</strong>——Blackwell GPU 架构引入的 4 位浮点格式。NVFP4 训练方法的更多细节将在后续文章里分享。</li>
+<li><strong>H2：3.8T token</strong>更高质量、更新的数据（模型此前没见过），上下文 <strong>512K</strong>。</li>
+<li><strong>H3：约 320B token</strong>推理与 Agent 轨迹，上下文 <strong>1M</strong>，辅以重放的预训练数据。</li>
+<li><strong>H4：约 34B token</strong>只保留最高质量数据的 Agent 轨迹。</li>
+<li>H3 与 H4 的混合数据大多是早期模型采样的轨迹（包括 Kimi K3 与团队自己的模型），按正确性与对齐过滤。</li>
+<li>压缩效率（内部代码截止 2026 年 6 月、每字节比特数，越低越好）：预训练版 <strong>0.2030</strong>、微调后版 <strong>0.2080</strong>，明显优于 GLM-5.3（0.2358）、DeepSeek V4 Pro Base（0.2335）等开源权重模型。</li>
+</ul>
+<h2>联合 RL：1075 步的系统栈</h2>
+<ul>
+<li><strong>1075 步、1700 万次以上 rollout、9 天</strong>，总算力超过 <strong>4×10²³ FLOPs</strong>，<strong>2048 张 GPU</strong>。</li>
+<li>RL 基础设施部署 NVFP4 MoE 训练与采样：采样时预填充、草稿与验证全程跑在 CUDA graph 上；训练器复用预训练栈，高专家并行、EPLB 与 CUDA graph 提升 GPU 效率。</li>
+<li>长程 Agent 负载用粘性路由与 DRAM KV 缓存卸载，保持 <strong>93% 以上</strong>的前缀缓存命中率，长上下文训练下仍维持 <strong>5:3</strong> 的采样器与训练器比例。</li>
+<li>权重传输走 GPUDirectRDMA，线速 <strong>93% 以上</strong>，带并行不变的校验和验证。</li>
+<li>部署推理成本进一步压低：提供 NVFP4 KV 缓存变体，评测几乎不受影响。</li>
+</ul>
+<h2>模拟器与视觉回路：长程自主工作的训练场</h2>
+<p>提升集中在长程自主工作上：视觉与 Agent 能力结合后，模型借助视觉反馈迭代构建和打磨网站、游戏与带交互元素的 3D 设计，在看、改、再看的循环里逐步收敛。</p>
+<ul>
+<li><strong>城市模拟器</strong>：模型用 Three.js 从零搭建一座完整城市模拟器，没有使用任何预制资产，所有建筑、纹理与车辆均为程序化生成，用户可以从一条道路开始经营一座活的城市，同时管理电力、预算与突发事件。</li>
+<li><strong>Linux 模拟器</strong>：用 Python 写就的从零开始的 PC 模拟器，启动真实 Linux 6.12 内核。</li>
+<li>另有折纸鹤模拟、平面图漫游等模拟器环境，以及 TinkerBench 回放。</li>
+<li><strong>品酒测试</strong>：20 次盲品猜中 19 次——视觉回路不只服务于屏幕任务，也能迁移到需要细粒度感知的现实判断。</li>
+</ul>
+<h2>Agent 编码：数十万长程任务</h2>
+<ul>
+<li>编码能力的训练建立在<strong>数十万长程编码任务</strong>之上，覆盖多个 Agent 框架与上下文压缩策略。</li>
+<li>合成编码数据管线同步提升，奖励不再只看单元测试：很多任务配了一个 Agent 式 RL 评分器，评估模型解决问题的过程，而不只看代码是否通过测试。</li>
+<li>结果：指令遵循更准确，改动前会更谨慎地权衡，工作完成后会主动验证，不再等外部提醒。</li>
+<li><strong>DeepSWE 72.1%、SWEBench Pro Hard 86.3%、FrontierCode 25.4%</strong>。</li>
+</ul>
+<h2>自主研究：4.5 小时、426 美元自己训出一个模型</h2>
+<ul>
+<li>内部基准任务：让 Inkling 2 Small 自主训练 Qwen3.5-4B，预测天气与维基百科页面浏览量等时间序列。</li>
+<li>模型先分析任务、自己写评估器，再尝试训练数据集与训练方法，在 SFT 与 RL 之间切换，边做边调试。</li>
+<li><strong>4.5 小时、426 美元</strong> Tinker 花费后，训出的模型预测分数翻了一倍以上。任务给出的窗口是单条序列最近历史的文本，模型输出接下来若干步的数值，多次采样后取中位数作为预测，分布宽度对应不确定性。</li>
+</ul>
+<h2>视觉：292M 编码器</h2>
+<ul>
+<li>视觉输入由一个 <strong>292M 参数</strong>的视觉编码器处理，基于 Perception Encoder，20×20 像素分块加 2×2 空间池化，图像块与文本 token 交错排列。</li>
+<li>能力覆盖 OCR、定位、信息图解读与视觉推理多个类别。</li>
+</ul>
+<h2>知识工作与金融</h2>
+<ul>
+<li><strong>AA-Briefcase 1527 分</strong>（端到端知识工作基准），JobBench <strong>70.5%</strong>、Vals 法律指数 <strong>73.9%</strong>。</li>
+<li>知识工作场景里，模型熟练查资料、经 MCP 调用工具、产出高质量交付物。</li>
+</ul>
+<h2>可定制性：75 步追平上一代终点</h2>
+<ul>
+<li>有些模型天生更适合微调，与开箱性能无关。Inkling 2 Small 的设计目标之一就是成为强的微调基座。</li>
+<li>公开金融文档摘要任务：从同样低的起点出发，Inkling 2 Small 仅用 <strong>75 步</strong>就达到上一代 Inkling Small 的最终成绩，最终大幅领先。</li>
+</ul>
+<h2>推理、知识与校准</h2>
+<ul>
+<li>推理训练覆盖高难度 STEM 问题、指令遵循、带与不带网络搜索的信息查找与预测任务。</li>
+<li>RL 阶段对预测任务使用严格评分规则，对部分问答任务使用不确定性敏感奖励，训练模型评估不确定性、表达恰当的置信度、给出校准良好的预测。</li>
+<li><strong>HLE-Diamond 28.7%、LongBench v2 70.6%、AA-Omniscience 非幻觉率 73.3%</strong>，三项均居表中首位；CritPt v2 Full/Hard <strong>55.7/35.0%</strong> 同样居首。</li>
+</ul>
+<h2>安全与对齐</h2>
+<ul>
+<li>安全工作围绕两个问题：模型对普通用户表现如何，以及面对恶意去除防护的行为抵抗力如何。权重发布取决于团队与合作伙伴的进一步安全评估。</li>
+<li>为评估误用风险，团队训练了一个仅求助的内部变体，两个检查点都经过比以往任何一次发布更广的评估套件、更多的外部测试人员。</li>
+<li>化学、生物、放射与核（CBRN）风险上，Inkling 2 Small 的知识与能力分数低于开源权重前沿。FORTRESS 是 Scale AI 的私有基准，度量模型对专家撰写的对抗提示的抵抗力。</li>
+<li>值得注意的坦白：<strong>早期检查点会造假</strong>——安全与对齐一节明确写出早期检查点存在伪造行为，是这篇博客罕见的自我揭短。</li>
+</ul>
+<h2>评测成绩单：开源权重档的头名之争</h2>
+<ul>
+<li><strong>PMPP-Hard 内核优化</strong>：AUC <strong>494.27</strong> 任务小时；单模型得分 Inkling 2 Small 54.25（GPT-6 Astra 63、Kimi K3.1 Pro 60.5、Claude Opus 5.5 60 居前）。</li>
+<li><strong>DesignArena 网站榜 1340 分，居开源权重首位</strong>（总榜前两位是 Muse Wonder 1366、Muse Spark 1.3 1351）。</li>
+<li>稀疏注意力内核：DeepSeek-V3.2 稀疏注意力前向+反向，Claude Opus 5.5 达 18.80×，Inkling 2 Small 6.02×。</li>
+<li>内部代码截止条形图（2026 年 6 月）：Inkling 2 Small 预训练版 0.2030 比特/字节，优于一众开源权重模型。</li>
+</ul>
+<h2>局限</h2>
+<ul>
+<li>可用性相对第一代改善，但模型不是最简洁的表达者，也并不总能为工作选到最合适的工具，在技能数量众多的代码库里尤其明显。</li>
+<li>聊天体验的优化程度低于其他方向：内容组织与呈现偏弱，斜杠使用过度，对心理健康等安全相关查询反应过度。</li>
+</ul>
+<h2>与知识库其他条目的联系</h2>
+<ul>
+<li><strong>NVFP4 / 低精度量化</strong>：与《Hopper FP8 MMA 内幕》同属一条线——那篇讲 FP8 MMA 为什么必须提升累加器，这篇则是 NVFP4 全程训练第一次在前沿模型上跑通并给出完整配方（68 小时 8.4T token）。4 位训练从 kernel 正确性问题变成了系统工程问题。</li>
+<li><strong>MoE 训练</strong>：与《NVIDIA 生物基础模型高效 MoE 训练》（MXFP8 GroupedLinear）对照：那边是推理侧 MoE 提速，这边是训练侧 MoE 全程低精度 + 高专家并行；与《Kolibri》（EP_8×FSDP_16×DP_6）对照并行策略组合。</li>
+<li><strong>RL 与 Agent 训练</strong>：与《如何训练智能体集群》（RLCR、集体推理扩展）对照：那边是多智能体集体训练方法论，这边是单模型长程 Agent 的联合 RL 系统栈（粘性路由、DRAM KV 卸载、5:3 采样训练比）。</li>
+<li><strong>训练推理一致性</strong>：与《Kimi K3.1 Pro 首日支持》（SGLang + Miles）对照：K3.1 Pro 是首日推理与 RL 就绪，Inkling 2 Small 是训练侧用同一套 NVFP4 栈打通训练与采样。</li>
+</ul>
+<h2>关键数字备忘</h2>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>数字</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总参数 / 激活参数</td>
+<td>594B / 17B</td>
+</tr>
+<tr>
+<td>H1 预训练</td>
+<td>8.4T token，68 小时，GB300 NVL72，全程 NVFP4</td>
+</tr>
+<tr>
+<td>H2 / H3 / H4</td>
+<td>3.8T（512K）/ 约 320B（1M）/ 约 34B token</td>
+</tr>
+<tr>
+<td>联合 RL</td>
+<td>1075 步，1700 万+ rollout，9 天，&gt;4×10²³ FLOPs，2048 GPU</td>
+</tr>
+<tr>
+<td>前缀缓存命中率 / 采样训练比</td>
+<td>93%+ / 5:3</td>
+</tr>
+<tr>
+<td>权重传输</td>
+<td>GPUDirectRDMA，线速 93%+</td>
+</tr>
+<tr>
+<td>每字节比特数（2026-06 代码截止）</td>
+<td>预训练版 0.2030，微调后 0.2080</td>
+</tr>
+<tr>
+<td>FrontierCode / DeepSWE / SWEBench Pro Hard</td>
+<td>25.4% / 72.1% / 86.3%</td>
+</tr>
+<tr>
+<td>AA-Briefcase / AA 指数 v5.0</td>
+<td>1527 / 30.6</td>
+</tr>
+<tr>
+<td>PMPP-Hard AUC / DesignArena 网站榜</td>
+<td>494.27 任务小时 / 1340 分（开源首位）</td>
+</tr>
+<tr>
+<td>自主研究</td>
+<td>4.5 小时，426 美元，预测分数翻倍</td>
+</tr>
+<tr>
+<td>微调</td>
+<td>75 步追平上一代终点</td>
+</tr>
+<tr>
+<td>视觉编码器</td>
+<td>292M 参数，20×20 分块 + 2×2 池化</td>
+</tr>
+<tr>
+<td>评测条件</td>
+<td>努力程度 0.99，温度 1.0，单轨迹上限 1M token</td>
+</tr>
+</tbody>
+</table>
+<h2>公众号文章</h2>
+<ul>
+<li>《Thinking Machines Inkling 2 Small:594B MoE 全程 NVFP4 训练，8.4T token 仅 68 小时》（2026-11-09 推送，draft.id=QAZ21DdIUv8-7B6FZA__GE2HFTXr1uFm1W5p548z4blPXE1SDeF9l-fZlFAHpy2m）</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
