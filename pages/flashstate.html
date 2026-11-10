@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlashState：为 Agent LLM 服务解锁灵活的混合状态管理 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>FlashState：为 Agent LLM 服务解锁灵活的混合状态管理</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.alphaxiv.org/pdf/2611.flashstate">https://www.alphaxiv.org/pdf/2611.flashstate</a></div>
+<h1>FlashState：为 Agent LLM 服务解锁灵活的混合状态管理 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://www.alphaxiv.org/pdf/2611.flashstate">FlashState: Unlocking Flexible Hybrid State Management for Agentic LLM Serving</a>（arXiv 2611，Together AI / UIUC / UT Austin，2026-11 发表；代码 https://github.com/FutureMLS-lab/FlashState，项目主页 https://flashstate.ai）
+收藏：2026-11-10，星级 5⭐（核心必读：混合模型前缀复用的完整机制 + 成本密度优先级 + B200 三模型实测）
+主题：并行策略（推理）/ 推理优化 / KV Cache / Agent 服务
+部署：vLLM + NVIDIA B200（每引擎 2 卡，张量并行），GLM-5.3-Flash / Nemotron 3 Super / Qwen3.8-Flash-Next</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>Agent 请求把上一轮的提示词与输出全带回来，只在末尾加一点，共享前缀越长重算越贵；混合模型（线性注意力层）复用前缀还要一个位于精确恢复位置的循环检查点，而它不能像 KV 那样截断回滚。FlashState 用任意状态检查点（ASC）把检查点放在任意 token 位置，再用一个依赖感知的 GDS 优先级同时管准入与逐出：B200 上编码 Agent 负载，GLM-5.3-Flash、Nemotron 3 Super、Qwen3.8-Flash-Next 的 prefill 吞吐最高达到 vLLM 的 3.14 倍、2.27 倍与 1.54 倍，p90 首 token 时间分别降低 88.4%、77.1% 与 79.0%。</p>
+<h2>混合模型为什么难复用</h2>
+<ul>
+<li>混合架构用线性注意力层或状态空间层替换一部分全注意力层：GLM-5.3-Flash 是 DSA + KDA，Qwen3.8-Flash-Next 是 QSA + GDN，Nemotron 3 Super 是 GQA + Mamba-2。线性注意力让解码更快，却让前缀复用多了一个条件。</li>
+<li>复用一段前缀需要它全部 token 的注意力 KV，外加一个概括整段前缀、位于前缀末尾的循环检查点；两者合起来就是这段前缀的混合状态。注意力 KV 可以截断到更早位置，靠后的循环检查点无法回滚出靠前的那一个。</li>
+<li>混合状态管理是三个不同的决策：<strong>循环检查点放置</strong>决定精确混合状态可以在哪里物化；<strong>混合状态准入</strong>决定新物化的混合状态是否留在缓存里；<strong>混合状态逐出</strong>决定内存承压时哪个已缓存的混合状态离开。</li>
+<li>已有的以 KV 为中心的设计把管理绑在 KV 缓存块的粒度上，灵活性在两处受限：检查点只能落在 KV 缓存块边界；逐出按单个 KV 缓存块回收，不联合考虑复用一段前缀所需的全部组件。</li>
+<li>乍一看的解法是把检查点布得更密，但每个留下的混合状态都要把检查点与依赖的 KV 留在有限预算里；轨迹越长，留下的状态越多，内存压力与逐出频率越高，可能抵消更细粒度复用的好处。关键挑战不只是检查点可以在哪里物化，而是准入哪一个、逐出哪一个，才能在有限内存下最大化节省的计算。</li>
+</ul>
+<h2>动机实测：vLLM 与 SGLang 的三类缺失</h2>
+<ul>
+<li>归因方法：每个已算的提示词 token 按根因归类——新内容在理想恢复位置之后，任何缓存机制下都必须计算；<strong>放置缺失</strong>位于理想恢复位置与引擎此前保存过的最近一个检查点之间；<strong>依赖缺失</strong>是因为保存过的检查点被逐出、而它依赖的 KV 还在；<strong>容量缺失</strong>是因为容量争用下检查点与部分 KV 一起被逐出。</li>
+<li><strong>放置太粗</strong>：vLLM 只在提示词内 4,352 token 的 KV 块边界保存检查点，解码中与请求结束时都不保存。低并发（8 到 16 会话）下 vLLM 几乎不逐出任何东西，放置缺失是唯一的可避免缺失，占未缓存提示词 token 的最高 43%。SGLang 用 256 token 网格，放置缺失降到每请求约 0.2K token，低并发下命中率比 vLLM 高出最高 3.1%，但每多一个检查点，缓存容量的争用就多一分。</li>
+<li><strong>逐出不看依赖</strong>：两引擎逐出检查点时都只看最近使用。SGLang 在 5.9M token KV 旁边单独留约 430 个检查点的池子，两池各按自己的 LRU 逐出；32 会话时它每请求保存的检查点达到 vLLM 的 4.2 倍，状态池满了就逐出 KV 还在的检查点。依赖缺失在 24 到 32 会话下造成 SGLang 未缓存提示词 token 的 33% 到 43%，受影响的请求中位重算 66K 到 68K token，接近整条前缀，尽管这段前缀的 KV 还在 GPU 内存里；同一负载下容量缺失不到每请求 0.4K token。SGLang 的命中率因此在 24 与 32 会话时跌到 vLLM 之下。</li>
+<li>vLLM 的检查点更少但规则相同：一个请求的提示词末尾检查点在该请求的第一个解码步就回到可逐出队列；依赖缺失从 40 会话起增长，64 会话时达到每请求 8.5K token，命中率跌到 62.4%。从 40 会话起，两引擎都进入混合状态抖动：容量缺失叠加到依赖缺失之上。</li>
+<li>先行工作（FreeToken、Marconi、Sparse Prefix Caching）同样受困于调参：Marconi 的逐出分把最近使用与 FLOP 效率用可调权重 α 加权，服务吞吐随 α 的选择最高相差 16%，而在线调优器（服务期间重放一次历史请求）不能稳定找到最优配置。最优平衡取决于负载特征，固定或手工调参的策略难以泛化。</li>
+</ul>
+<h2>任意状态检查点（ASC）：把检查点从块边界上解开</h2>
+<ul>
+<li>ASC 把循环检查点放置从两个已有的边界上解耦：KV 缓存块边界与 prefill 调用边界。可复用的前缀不必在任一边界上结束。</li>
+<li><strong>请求完成时精确捕获</strong>：ASC 在请求完成时捕获已处理前缀的精确终点处的混合状态；组件一起提交给准入，准入后留在已有的 KV 缓存块里，捕获本身不拷贝任何模型数据。终点落在一个 KV 块内部时，FlashState 保留整个末尾 KV 块，但只把属于已捕获前缀的 token 标为有效——精确可复用的前缀位置从物理块边界上解耦，同时保留引擎原有的块大小。</li>
+<li><strong>块内状态导出</strong>：把目标偏移 c 传给后端，内核在完成原来计算的同时，把该位置的检查点作为副产物导出。现有的无导出融合内核通常只维护推进中的 live 循环状态，调用结束时才写出最终状态 S_final；内部状态 S_c 在数学上存在，却没有以服务系统可读的形式保留下来。这是内核数据流与接口的限制，不是线性注意力递推本身的限制。</li>
+<li>对递推 S_t = F(S_{t-1}, x_t)，约定为 PrefillExport(X, S0, c) → (O, S_final, R_c)：R_c 等于同一后端在 c 处截断调用时产生的标准循环检查点，O 与 S_final 与无导出调用完全相同。KDA 的导出网格与计算分块对齐，内核直接序列化分块边界上已有的 live 状态；GDN 的计算分块更大，内部位置的状态没有直接物化，内核用该分块已算出的操作数做一次有界前缀更新得到 R_c，再继续原来的整分块计算。两种实现内部不同，但都只导出一个检查点，副产物不反馈进 live 状态。导出之后，R_c 与同一前缀的注意力 KV 组合，在位置 p = q + c 处形成精确混合状态。</li>
+</ul>
+<h2>建模：最小化冗余 prefill</h2>
+<ul>
+<li>理想恢复位置 ℓ⋆_r 是请求提示词中已被处理的最长前缀的末尾；实际恢复位置 ℓπ_r 是可用混合状态里最接近理想位置的那一个，没有则为 0。请求对 [ℓπ_r, ℓ⋆_r) 重复全模型 prefill。</li>
+<li>目标：在缓存预算 B 之下，选一个在线准入与逐出策略 π，最小化 Σ_r C(ℓπ_r, ℓ⋆_r)，其中 C(a, b) 是从前缀位置 a 到 b 的估计全模型 prefill 时间（相邻区间上可加）。策略是因果的，只在 ASC 可以物化的位置保留混合状态，保护 live 请求所需的分配；预算 B 只针对持有缓存分配的内存，不含模型权重与执行工作区，可包括主机内存层。</li>
+<li>冗余 prefill 拆成三项：C(ℓπ_r, ℓ⋆_r) = C(ℓmat_r, ℓ⋆_r)（放置） + C(ℓkv_r, ℓmat_r)（容量） + C(ℓπ_r, ℓkv_r)（依赖）。其中 ℓmat_r 是已物化终点里离理想位置最近的，ℓkv_r 是注意力 KV 仍驻留的终点里离理想位置最近的。ASC 解决放置项，准入与逐出控制容量项与依赖项。</li>
+<li><strong>恢复成本与释放容量</strong>：逐出混合状态 u 时，另一个完整状态或 live 请求仍需要的块继续留着，只释放剩下的块集合 F(u)；KV 块等大，其个数就是释放容量 s(u) = |F(u)|。被逐出后，本会从那里恢复的请求退回最近的可用位置 f(u)，恢复成本 g(u) = C(f(u), p(u))。成本密度 ρ(u) = g(u)/s(u)，即每释放一个 KV 块多算的 prefill；它不预测这个状态会不会被复用。</li>
+<li><strong>最优策略的三条性质</strong>（计时器模型：每个对话在等工具时最多保留最新的一个混合状态，请求完成时设定时器；假设工具调用时长独立同分布，忽略 KV 按整块取整，约束平均缓存占用）：</li>
+<li>性质 1：每次请求结束都物化混合状态，放置项消失。</li>
+<li>性质 2：存在一种最优策略，逐出 u 时恰好释放 F(u)，且不留死分配，因此没有依赖项。</li>
+<li>性质 3：在计时器模型里，存在一种最优策略，只按成本密度给每个混合状态设定时器，且成本密度越高，时器不更短。</li>
+<li>FlashState 的对应机制：ASC 在请求完成时捕获混合状态（性质 1）；依赖感知逐出恰好释放 F(u)（性质 2）。对性质 3，GDS 维护水位 Λ（至今逐出的最高优先级），一个没有复用的状态留在缓存里，直到水位自它上次使用以来上升了它的成本密度；大缓存下把上升近似为匀速，时器就正比于成本密度，无需知道工具调用时长分布。整混合状态的 LRU 在同样近似下给每个状态几乎相同的时器；在工具调用时长的常见分布下，GDS 在计时器模型里节省的 prefill 至少不比这个 LRU 少。</li>
+</ul>
+<h2>一个优先级管准入与逐出：依赖感知的 GDS</h2>
+<ul>
+<li>优先级 H(u) = stamp(u) + ρ(u)：stamp(u) 是 u 上次使用时记录的水位（首次被缓存、请求从它恢复、或最后一个持有它的 live 请求结束，都算一次使用）；ρ(u) 是它每释放一个块的恢复成本。两项的单位都是每 KV 块的 prefill 时间，可以直接相加，无需按负载调系数。缓存压力下逐出不断推进水位，水位涨得越快，没有进一步复用的状态在计时器模型里留存越短。</li>
+<li><strong>准入</strong>：新状态以当前水位为 stamp，进入同一优先级排序；没有空闲 KV 块时，如果 GDS 下一个要逐出的就是它，则不准入。<strong>逐出</strong>：请求需要块而没有空闲时，逐出优先级最低的合格混合状态——已缓存、有正释放容量、不被任何 live 请求持有；逐出恰好释放 F(u)，水位升到 H(u)（如果更高）。</li>
+<li>关键在"恰好释放 F(u)"：按整条前缀算会高估释放容量、低估成本密度；依赖感知的逐出只算真正能腾出来的块，优先级才排得准。</li>
+</ul>
+<h2>B200 三模型实测</h2>
+<ul>
+<li><strong>负载</strong>：编码负载回放 SemiAnalysis 发布的 Claude Code 轨迹（子 Agent 交错、请求之间有停顿），1M 上下文上限下平均提示词 219K token（中位 142K）；数学负载用 mini-SWE-agent 跑 PutnamBench 的 Lean 题目，取 100 条无错完成且输出最长的轨迹，共 6,348 个请求，解码重（每请求平均生成 2,292 个 token、最多 32,769 个，几乎全是推理，中位提示词 37K）。每个会话闭环重放一条轨迹，上一响应到达且记录的工具时间过去后发下一请求；后续提示词包含服务器生成的输出，包括其中的推理。</li>
+<li><strong>模型与部署</strong>：GLM-5.3-Flash（KDA，NVFP4）、Qwen3.8-Flash-Next（GDN，FP8）、Nemotron 3 Super（Mamba2，FP8）；每引擎 2 张 B200，张量并行；编码负载 GLM 与 Nemotron 用 1M 上下文，Qwen 用 512K；数学负载 GLM 128K。基线 vLLM 在提示词内每个 KV 块边界保存检查点、按 LRU 逐出；FlashState 实现在 vLLM 里，相同缓存预算、批量大小与 prefill 分块大小，差异只来自混合状态管理。</li>
+<li><strong>编码 Agent（图 5、图 6）</strong>：三模型上 FlashState 的峰值解码吞吐为 vLLM 的 1.14 到 1.28 倍，峰值出现的时间晚约 8 个会话；48 会话下解码吞吐最高为 vLLM 的 3.02 倍、prefill 吞吐 3.14 倍，p90 首 token 时间最多降低 88.4%。过了峰值，vLLM 的命中率崩塌，请求重算大部分提示词，首 token 变慢，还占用解码的 GPU 时间；FlashState 保持高命中率，吞吐直到 48 会话仍接近峰值。工作集（每个 live 对话无重算恢复下一请求所需的缓存块）只在 32 到 49 会话就达到缓存容量；超过之后，准入与逐出策略决定哪些对话无重算恢复。</li>
+<li><strong>跨架构通用（图 7）</strong>：每请求未缓存 token 的减少随 KV 块大小增长——请求的理想恢复位置通常是上一请求的结束，vLLM 的实际恢复位置是上一提示词的最后一个块边界，差距覆盖上一提示词的剩余部分与上一输出，随块大小增长。每个模型上 FlashState 把中位未缓存 token 比 vLLM 降低约 70% 的一个块（Qwen 72%、GLM 81%、Nemotron 87%）。请求完成时引擎持有该位置检查点需要的一切，同一机制适用于三个架构。关键洞见：恢复位置应由前缀复用的机会决定，而不是物理 KV 分配。</li>
+<li><strong>数学研究 Agent（图 8）</strong>：16 到 64 会话下解码吞吐比 vLLM 高 2.0% 到 9.6%。轨迹短、输出长，live 对话不争缓存，vLLM 的命中率随并发增长保持平稳；增益来自恢复位置而不是准入与逐出——vLLM 解码中不保存检查点，每轮重算整个上一输出；FlashState 从上一请求的精确结束处恢复，最多重算上一输出的约 1%。重算与解码争 GPU，省下的 prefill 也加快解码，每条序列的解码比 vLLM 快 1% 到 9%。</li>
+<li><strong>与 Mooncake 联合</strong>：配上 Mooncake 之后，FlashState 服务栈的吞吐最高提升 41.4%，p90 首 token 时间最多降低 81.6%（附录 D）。</li>
+</ul>
+<h2>消融：ASC 与状态管理互补</h2>
+<ul>
+<li>四种配置一起跑 Qwen3.8-Flash-Next、512K 上下文、32 与 48 会话：vLLM → +ASC（每个提示词末尾与输出末尾保存检查点，保留 LRU 逐出）→ +检查点准入（依赖感知的混合状态单元 + LRU 分数）→ +依赖感知逐出（完整 FlashState）。</li>
+<li>48 会话、接近缓存容量时，ASC 配 LRU 已经提供 FlashState 相对 vLLM 增益的约 70%，检查点准入与依赖感知逐出再加 7.6% 与 5.3%。32 会话、工作集只占缓存容量约 60% 时，ASC 配 LRU 的解码吞吐反而低于 vLLM：LRU 留住 ASC 保存的每个检查点，但一个对话通常只从最新的那一个恢复（上下文编辑后例外）；旧检查点挤掉等待长工具调用的对话的上下文。检查点准入与依赖感知逐出分别加 8.5% 与 7.8%，把完整系统带回 vLLM 的水平。</li>
+<li>数字背后：32 会话下 ASC 单独时，缓存中找到可复用上下文不足 10% 的请求在理想恢复位置之外重算 39.8M token，vLLM 下是 9.6M；其中 37.1M 属于上一请求结束至少 60 秒后才发出请求的对话。检查点准入把 39.8M 降到 25.7M，依赖感知逐出进一步降到 10.6M。ASC 暴露的额外位置，只有准入与逐出按依赖与优先级选择时，才可靠地兑现收益。</li>
+</ul>
+<h2>与已收藏文章的联系</h2>
+<ul>
+<li><a href="pages/atom-mooncake-shared-kv-pool.html">ATOM 遇上 Mooncake</a>：同一批编码 Agent 负载、同一个 Mooncake 联合部署。本篇是服务引擎内部的混合状态管理，ATOM 篇是引擎外部的共享 KV 池；两者合起来，Agent 长会话的 KV 既能在引擎内精确复用，也能在跨 NUMA/跨服务器的池子里长期持有。</li>
+<li><a href="pages/llm-serving-engine-anatomy.html">LLM 服务引擎解剖</a>：服务引擎的 KV 内存管理一层，本篇是该层在混合模型上的具体实现——检查点放置、准入与逐出三个决策的建模与优先级设计。</li>
+<li><a href="pages/kimi-k3.1-pro-day0.html">Kimi K3.1 Pro 首日支持</a>：Kimi 用的也是 KDA（Kimi Delta Attention）；本篇的 ASC 在 KDA 内核里的导出实现（导出网格与计算分块对齐、直接序列化分块边界上的 live 状态）与 Kimi 的线性注意力层直接相关。</li>
+<li><a href="pages/gb200-nvl72-dynamo-moe.html">GB200 NVL72 与 Dynamo</a>：Dynamo 的分解服务同样把 prefill 与 decode 分开；本篇补上分离式部署里前缀复用的另一面——恢复位置的精确性，以及为什么只加密检查点不够、准入与逐出必须一起选。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
