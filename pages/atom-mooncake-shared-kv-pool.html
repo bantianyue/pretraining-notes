@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATOM 遇上 Mooncake：AMD Instinct GPU 上 Agent 服务的共享 KV 池 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>ATOM 遇上 Mooncake：AMD Instinct GPU 上 Agent 服务的共享 KV 池</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://kvcache.ai/blog/atom-meets-mooncake/">https://kvcache.ai/blog/atom-meets-mooncake/</a></div>
+<h1>ATOM 遇上 Mooncake：AMD Instinct GPU 上 Agent 服务的共享 KV 池 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://kvcache.ai/blog/atom-meets-mooncake/">ATOM Meets Mooncake: A Shared KV Pool for Agentic Serving on AMD Instinct GPUs</a>（KVCache.AI 博客，2026-11-09 发表）
+收藏：2026-11-10，星级 5⭐（核心必读：KV Cache 共享池的完整机制 + 单机/四机实测）
+主题：并行策略（推理）/ 推理优化 / KV Cache / Agent 服务
+部署：ATOM + Mooncake，AMD Instinct MI355X 单机（8 卡）与 MI350X 四机（32 卡），GLM-5.3 / GLM-5.2</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>编码 Agent 把同一段长对话一次次发回来，服务它就是长期持有会话历史；prefill 与 decode 分离部署把服务器主存也一劈为二，decode 一侧的主存几乎闲置。Mooncake Store 把两边主存拼成 1.5 TiB 共享 KV 池：单机 8 卡 MI355X 上扛住约 100 个并发 Agent 会话，每 GPU 约 44K token/s，提示词复用超 95%；四台 MI350X 上一个共享池比各用各的池吞吐高约 2 倍，p90 首 token 时间从 19.3 秒降到 2.3 秒以内。</p>
+<h2>Agent 会话为什么难服务</h2>
+<ul>
+<li>AgentX 回放录制的 Claude Code 会话（会话 ebaea288，语料中位数 65 个主线程请求）：近两小时里主线程上下文从 4 万 token 长到 17.3 万 token，中途一度并行拉起 4 个子 Agent。</li>
+<li>三个决定性的事实：<strong>历史几乎全复用</strong>——一次请求中位带 14.2 万输入 token，完美前缀缓存下只需 prefill 1,700 个；<strong>历史很重</strong>——GLM-5.3 用 FP8 KV 缓存，每 token 48,672 字节，10 万 token 对话约 5 GB；<strong>历史大部分时间在等</strong>——182 秒等待里 7.2 GB KV 无事可做，下一轮却全要；4 个子 Agent 并行时会话实时 KV 跳到 26 GB。</li>
+<li>长暂停之后只有前 32,704 个 token 和之前发过的一致，其余得重新 prefill。182 秒等待结束，主线程发 147,904 个 token，其中 146,944 个以前发过：历史还在只算 960 个 token，不在全算。</li>
+</ul>
+<h2>GPU 显存不够用，分离部署让问题更糟</h2>
+<ul>
+<li>每个实时会话留着约 10 GiB 稍后要复用的历史，约 100 个会话要约 1 TiB；4 张 prefill 卡扣掉模型权重只剩约 0.4 TiB KV 空间。负载一高，等待中的历史被逐出，下一轮重新 prefill。</li>
+<li>主机 DRAM 有空间，但分离把它劈开：服务器每半边各一个 NUMA 节点，prefill 与 decode 各占一个；decode 一侧同样多 DRAM，几乎不存历史，因为 decode 把工作 KV 放在 GPU 显存里。容量有，在错的一边。</li>
+<li>目标有三：留住远超 GPU 显存的 Agent 历史；把池命中变成 prefill 命中，安全且及时；每请求的 KV 交给 decode 的速度跟上 prefill 产出的速度。</li>
+</ul>
+<h2>共享 KV 池：Mooncake Store</h2>
+<ul>
+<li>Mooncake Store 把提供内存的服务与使用内存的客户端分开，正适合分离式服务器。每 NUMA 节点跑一个 Store 服务，各出 768 GiB DRAM，加一个 Mooncake Master 管对象位置、池到 90% 时按最近最少使用淘汰。</li>
+<li>只有 prefill 卡读写池子，decode 的 NUMA 节点却供了一半内存：<strong>1.5 TiB KV 池，接近 prefill GPU KV 空间的 4 倍</strong>，用的本来是闲置的内存。同样设计能跨服务器扩展：每加一台服务器的 Store 服务加入同一个池，池随服务器长大，prefill 卡经 RDMA 读写，和本机一样。</li>
+<li>池子还需要大页：全部内存都向 RDMA 网卡注册，区域里任何一部分回落到 4 KiB 页，注册就失败。忙主机上透明大页保证不了，于是 Store 服务启动前预留大页；四台 NeuroSpark 服务器上，启动 Store 前清缓存加整理内存，透明大页就够了。</li>
+</ul>
+<h2>两条 KV 路径</h2>
+<ul>
+<li><strong>Store 管会话稍后要用的 KV</strong>：产生它的请求结束后还留着，decode 从不读它。<strong>Transfer Engine 搬请求当下要用的 KV</strong>。ATOM 定哪段 KV 可复用、何时用安全；Mooncake 定它住哪、怎么搬。</li>
+<li>部署形态：ATOM 在一个 NUMA 节点的 4 张卡上跑一个 prefill 实例，在另一个 NUMA 节点的 4 张卡上跑一个 decode 实例，ATOM 路由器挡在前面。prefill 按层切分模型（每张卡约四分之一层，流水线的一个阶段）；decode 按 token 切分序列（每张卡持有每第四个 token、全部层）。</li>
+<li>一轮到达：prefill 先复用 GPU 显存里最长的前缀，超出部分从 Store 经 RDMA 直读进 GPU 显存；只算两边都没有的 token，新 KV 存进 Store 备下一轮用。路由器把请求交给 decode，Transfer Engine 把 KV 从 prefill 卡搬到 decode 卡，decode 生成答案。</li>
+</ul>
+<h2>从池命中到首个 token：阶段对齐恢复</h2>
+<ul>
+<li>池命中要省功，得四个 prefill GPU 在请求开工前各拿到自己那份。历史很远（可能在任一半 DRAM 里，得跨网络进 GPU 显存）、是打包的（池里是 plain bytes，得解包成注意力读的分页 KV）、还是全有或全无（prefill 按层切分，前缀只有四个阶段都有才可用）。</li>
+<li>ATOM 按 prefill 的切分方式存 KV：每个流水线级把每 256 token 块的自己那几层存成单独的 Store 对象，前缀只有四个阶段都持有才算命中。Mooncake 把一个块的四个对象放进一组、一起淘汰，淘汰不会留下只有部分阶段能加载的块。小块的另一好处：中途改历史的轮次，仍复用改动点前最后一个 256 token 边界之前的一切。</li>
+<li>每张 prefill 卡向 Mooncake 注册一个缓冲区：KV 在该缓冲区与 Store DRAM 之间走 RDMA，GPU 自己打包解包，路径上没有 CPU 拷贝。需要 Store 数据的请求等到每个阶段都拿到自己那份，其他请求继续跑。</li>
+</ul>
+<h2>KV 交接：聚合 + 大块 RDMA 写 + 分散</h2>
+<ul>
+<li>prefill（PP4）与 decode（TP4 加 DCP4）的 KV 布局不同：prefill 卡持有自己那几层的全部 token，decode 卡持有每第四个 token、全部层。直接拷贝变成每 token 每层一次小写：一个 8,192 token 块、一个 20 层阶段，就是 <strong>163,840 次 576 字节写</strong>，瓶颈在发写操作，不在网络。</li>
+<li>ATOM 改为在 prefill GPU 上把要去同一张 decode 卡的 KV 聚进连续缓冲区；Transfer Engine 以最高 8 MiB 的 RDMA 写把每块缓冲区搬进 decode 卡上的着陆缓冲，decode 再分散进自己的 KV 页。同一块约 94 MB，现在只要 <strong>12 次写</strong>。</li>
+<li>代价是用 GPU 算力与显存换更少的网络操作：聚合与分散跑在 GPU 上，暂存与着陆缓冲占了本可放 KV 的 GPU 显存；请求只有分散完成后才能交给 decode。</li>
+</ul>
+<h2>单机实测：8 卡 MI355X，GLM-5.2</h2>
+<ul>
+<li>InferenceX AgentX 扫测，56 到 112 个并发 Agent 会话：每 GPU 吞吐从 56 会话的约 31K token/s 涨到 96 与 112 会话的约 44K，用户中位生成速度约 46 token/s。</li>
+<li>复用率：56 会话时 prefill GPU 显存供 81% 的提示词 token，Store 供 16%；到 112 会话 Store 占全部提示词 token 的 46%；<strong>总复用率每档都在 95% 以上</strong>，接近 trace 允许的 96-97%。</li>
+<li>Store 省了什么：Store 那份若得现算，112 会话时 prefill 要算约一半提示词 token 而不是 4.6%，约 11 倍 prefill 工作量；96 会话时约 9 倍（按实测份额的估算，不是无 Store 的对照跑）。</li>
+<li>恢复速度：一次典型恢复带回 11 万到 13 万 token 历史，每张 prefill 卡读加解包自己那份中位 150-220 毫秒；四个阶段不同时加载，请求从第一阶段开工等到最后阶段完成平均 0.4-1.2 秒。112 会话时 Mooncake 每小时在服务器内搬约 66 TB KV。</li>
+<li>上限：96 会话之前首 token 时间中位一直在 2.5 秒或以下；112 会话时 decode 的 KV 显存中位占用 91%，请求开始在 prefill 前排队，首 token 时间中位约 7 秒。</li>
+</ul>
+<h2>四机实测：32 卡 MI350X，GLM-5.3</h2>
+<ul>
+<li>部署：32 张卡跑 6 个 prefill 实例与 2 个 decode 实例（6P2D），排成两组、每组 3 个 prefill 加 1 个 decode，后面挂 KV 准入闸。每个 decode 实例跑 TP4 加 DCP4。池子按 RoCE 通道切成四份，各有自己的 Mooncake Master；每台服务器出 8 个 96 GiB Store 服务，总共约 3 TiB；只有 prefill 实例读写它。</li>
+<li>生产流量回放（0.6 / 0.8 / 1.0 请求/秒三档，每档 20 分钟）：<strong>共享池下 Store 服务 58% 的提示词 token，复用率 95-96%，prefill 只算 4-5%，首 token 时间中位约 1.0 秒，p90 在 1.7-1.8 秒</strong>。分池下 Store 只服务约 11%，复用率掉到 51-55%，prefill 要算每轮提示词的一半，首 token 时间 p90 升到 7-10 秒——闸与路由器把一个会话的各轮散到 6 个 prefill 实例，下一轮通常落在没有该会话历史的服务器上。</li>
+<li>AgentX 扫测（56 到 112 会话，每档 15 分钟）：共享池吞吐从 56 会话的 256K token/s 涨到 96 会话峰值 389K，112 会话 348K；首 token 时间中位约 1.0 秒，p90 不超过 2.3 秒；复用率 94-96%。分池吞吐卡在 156K-194K token/s：<strong>共享池 56 会话快 1.6 倍，96 与 112 会话约 2 倍</strong>；分池下复用率随会话变多从 79% 掉到 65%，首 token 时间 p90 从 3.9 秒爬到 19.3 秒。</li>
+</ul>
+<h2>未来工作</h2>
+<ul>
+<li>把一个池子共享到更多服务器：四台上一个共享池在高并发下已比各用各的池快约 2 倍；更宽的池子能让更多会话保持这么高的复用率，代价是更多跨服务器流量与更大的故障域。</li>
+<li>加 SSD 层：有些 Agent 会话一停就是好几分钟，Mooncake 的 SSD 卸载能以 DRAM 零头的成本留住它们的历史。</li>
+<li>给 decode 腾地方：decode 把每个运行中请求的 KV 放在 GPU 显存里，单机 112 会话时已接近占满；每个 prefill 实例配更多 decode GPU、每张 decode 卡放更多 KV 是下一步。</li>
+<li>跨节点 RoCE 拥塞控制：多对一与一对多 RDMA 流量（prefill 到 decode 的 KV 交接、跨服务器 Store 恢复）需要能用的拥塞控制，ECN/DCQCN 或 PFC，让带宽在各 GPU 间分得均匀。</li>
+</ul>
+<h2>测试环境要点（四节点 GLM-5.3）</h2>
+<ul>
+<li>硬件：四台 NeuroSpark 8×MI350X 服务器（每卡 288 GB HBM3E），每台 4×400G RoCE 网卡（BlueField-3 DPU）；一台 AMD Epyc 9575F（64 核）+ 1.5 TB DDR5，每台另有一张 NVIDIA L40S；RoCE fabric 为 8×400G 交换机直连。</li>
+<li>软件：ROCM 10.0 容器，ATOM 主分支（a2b01ce），Mooncake 主分支（e54f3ee，含 per-allocator 迁移），GLM-5.3（MXFP4 权重、FP8 KV 缓存）。</li>
+<li>配置：AgentX 扫测用 PP4 prefill + TP4/DCP4 decode；生产流量对比用 TP4 prefill。单机部署用 MI355X，GLM-5.2（MXFP4 权重、FP8 KV 缓存、多 token 预测）。</li>
+</ul>
+<h2>与已收藏文章的联系</h2>
+<ul>
+<li><a href="pages/llm-serving-engine-anatomy.html">LLM 服务引擎解剖</a>：服务引擎的 KV 内存管理一层，本篇是该层在 Agent 长会话负载下的具体实现——共享 KV 池 + 两条 KV 路径。</li>
+<li><a href="pages/kimi-k3.1-pro-day0.html">Kimi K3.1 Pro 首日支持</a>：SGLang 的 DP 注意力把每卡 KV 从 16.9 GiB 降到 4.2 GiB；本篇走另一条路——把闲置的 decode 侧主存拼进池子，KV 空间扩到 GPU 的 4 倍。</li>
+<li><a href="pages/gb200-nvl72-dynamo-moe.html">GB200 NVL72 与 Dynamo</a>：Dynamo 的分解服务同样把 prefill 与 decode 分开；本篇补上了分离式部署里最容易被忽视的副作用——主存也被一劈为二，以及用共享 KV 池把它拼回去的办法。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
