@@ -196,6 +196,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">训练核心流程</span><span class="tag">MoE 架构</span><span class="tag">NVFP4</span><span class="tag">强化学习</span><span>收藏于 2026-11-09</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">31</span>《ATOM 遇上 Mooncake》AMD Instinct GPU 上 Agent 服务的共享 KV 池</h3>
+  <p>编码 Agent 把同一段长对话一次次发回来，服务它就是长期持有会话历史；prefill 与 decode 分离部署把服务器主存也一劈为二，decode 一侧的主存几乎闲置。Mooncake Store 把两边主存拼成 1.5 TiB 共享 KV 池，KV 空间接近 prefill GPU 的 4 倍；单机 8 卡 MI355X 上扛住约 100 个并发 Agent 会话，每 GPU 约 44K token/s，提示词复用超 95%；四台 MI350X 上一个共享池比各用各的池吞吐高约 2 倍，p90 首 token 时间从 19.3 秒降到 2.3 秒以内。两条 KV 路径：Store 按 256 token 分块、四级成组淘汰；Transfer Engine 聚合加大块 RDMA 写，12 次写代替 163,840 次小写。</p>
+  <div class="links">
+    <a class="cn" href="pages/atom-mooncake-shared-kv-pool.html">中文精读 →</a>
+    <a class="en" href="https://kvcache.ai/blog/atom-meets-mooncake/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-10</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
