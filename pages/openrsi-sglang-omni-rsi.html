@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenRSI × SGLang-Omni：递归自我改进优化推理栈 — 中文精读 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>OpenRSI × SGLang-Omni：递归自我改进优化推理栈 — 中文精读</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://index.openrsi.foundation/blog/2026/openrsi-sglang-omni/">https://index.openrsi.foundation/blog/2026/openrsi-sglang-omni/</a></div>
+<h1>OpenRSI × SGLang-Omni：递归自我改进优化推理栈 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://index.openrsi.foundation/blog/2026/openrsi-sglang-omni/">OpenRSI × SGLang-Omni: Scaling RSI for AI Infra</a>（OpenRSI 博客，2026-11-09 发表）
+收藏：2026-11-10，星级 4⭐（重点阅读：带约束 RSI 的完整方法 + 五种推理优化模式 + 实测）
+主题：并行策略（推理）/ 推理优化 / AI Agent / 评估器</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>递归自我改进（RSI）大多停留在基准测试，OpenRSI 把它搬到真实推理基础设施：Agent 在 RSI-Harness 上优化 SGLang-Omni 的语音服务，14 个改动合入上游、覆盖 8 个语音模型，搜索收益最高 2.20 倍（MOSS-TTS）。关键不是 Agent 会写代码，而是把人从优化的内循环里拿出来：Agent 提议、跑、测，Harness 裁决，独立验证器确认每一份收益。</p>
+<h2>为什么是带约束的 RSI</h2>
+<ul>
+<li>今天的常见做法：工程师带着编码 Agent 干活，人挑每一次实验、读每一次结果、定下一步。人就是循环本身，对系统工作很贵：每轮都要等人，墙钟时间大多花在等人上；Agent 只探索人想得到、来得及检查的东西，而服务栈里的小开关、设置与代码路径数不清。</li>
+<li>一个让空闲线程停转的改动最初藏在一个更大的改动里；拆出来单独测，值 +32.5% 的流式吞吐。</li>
+<li>带约束的 RSI：把人从性能优化的内循环里拿出来，不是把人从工作里拿出来。定义问题（任务、基准、守卫）要人的功夫，系统设计也留在人手里；定义好之后，Agent 一轮接一轮地提议、跑、测，人回来评审找到的东西。</li>
+</ul>
+<h2>两层循环与验证</h2>
+<ul>
+<li>内循环：Agent 探索。外循环：Harness 裁决何时评判、把每一条教训带进下一轮。轮次一轮接一轮跑，不等任何人。</li>
+<li>每一步都验证：独立验证器确认之前什么都不算数，Agent 永远看不到验证器。一次搜索里，每个确认的收益都成为下一轮必须超过的线；跨改动看，后面的工作站在已落地的改动上（一个改动在空闲线程改动已合入的前提下测得，另一个改动复用了异步 prefill）。这就是今天的递归：AI 改进 AI 跑在上面的基础设施。</li>
+</ul>
+<h2>RSI-Anything 流水线</h2>
+<ul>
+<li>六步：01 提案（人写研究提案）→ 02 Harbor 任务（Agent 建出带可执行基准与评估器的任务）→ 03 迭代（Agent 在 RSI-Harness 上跑实验、改代码）→ 04 验证（复现收益）→ 05 贡献（带着证据开改动请求）→ 06 合入（维护者评审后合入）。收益复现不了退回 03，评审要求改动退回 05。</li>
+<li>人写提案、拥有合入权；SGLang-Omni 维护者多轮提要求、参与设计，有的自己贡献代码或独立复现结果。</li>
+</ul>
+<h2>五种优化模式</h2>
+<ul>
+<li>几乎全部改动是去掉模型周围运行时的开销（不改权重、不改采样）：</li>
+<li><strong>空闲线程抢核</strong>：等待时空转的线程占着 CPU 核，让它们休眠，核还回来，排队的活立刻开工。</li>
+<li><strong>每跳都转一次数据</strong>：张量过阶段边界先转 Python 列表、到另一边再重建；现在张量直接走，只有最后一条消息带类型化字节。</li>
+<li><strong>算了没人用的活</strong>：没人调用的量化器重建、每个嵌入通道一份新张量、回退路径上跑两遍的前端、提取到超过需要位置的音频特征、每请求重编一次的参考音频。</li>
+<li><strong>零碎 GPU 启动太多</strong>：一次启动一个小核，GPU 在等 CPU；整步捕获成 CUDA 图或把核融起来一次回放；编码器注意力移到 FlashAttention-4。</li>
+<li><strong>两台机器互相等</strong>：prefill 与 decode 在两台机器上轮流干活；现在 prefill 一干完就启动下一个，它的 decode 在 decode 机器干完前一个请求的那一刻启动。</li>
+<li>例外：Whisper 的改动加了增量文本流式；Ming3-TTS 的流式音频由人设计。输出正确性与质量在报告的测试覆盖内检查过；波形不变、感知质量不变没有定论。</li>
+</ul>
+<h2>合入结果：表 1</h2>
+<ul>
+<li>8 个模型、128 请求/轮、H100 非流式/流式收益：CosyVoice3 +44.4%/+46.2%、MOSS-TTS +48.5%/+76.3%、Fish S2-Pro +9.6%/+0.3%、Qwen3-TTS +25.2%/+4.7%、Qwen3-ASR +14.2%/+5.0%、Whisper +7.6%/+12.2%、MOSS-TD +18.8%/+30.0%、Ming3-TTS +326.5%/+93.9%。</li>
+<li>注意事项：Ming3-TTS 的区间包括另外 28 个改动、还修了基线里的一个采样 bug，+326.5% 不是纯 OpenRSI 的功劳；MOSS-TTS 的 H200 流式基线偏低（3.90 请求/秒，对 H100 的 5.32），+149.5% 要谨慎看待；部分区间还包括 SGLang 版本升级，且两侧跑在不同镜像上。</li>
+<li>默认开启：多数改动只改代码、不改默认设置；MOSS-TTS 的异步解码默认开启、AR 内存占比 0.72 降到 0.60；Qwen3-ASR 的完整 prefill 图与异步 prefill 在 CUDA 上默认开启（异步 prefill 会抬高部分流式尾延迟）；Ming3-TTS 的流式是 opt-in。</li>
+</ul>
+<h2>搜索过程：图 4</h2>
+<ul>
+<li>前六个模型各自最优的一次搜索：CosyVoice3 1.54 倍（6 次运行，首个收益 46.4 小时，唯一超过 8 小时）、MOSS-TTS 2.20 倍（17 次，7.3 小时）、Fish S2-Pro 1.80 倍（4 次，5.0 小时）、Qwen3-TTS 1.44 倍（10 次，4.6 小时）、Qwen3-ASR 1.66 倍（5 次，7.4 小时）、Whisper 1.98 倍（2 次，4.2 小时）。六个里有五个，第一个通过全部守卫的候选在八小时内出现。</li>
+<li>奖励是相对任务冻结基线的吞吐；守卫还查延迟与词错率，更快的候选也可能失败。</li>
+</ul>
+<h2>为什么进展这么快</h2>
+<ul>
+<li>服务有记分牌：吞吐与延迟能自动测量，循环拿到密集可靠的信号。质量难打分：词错率只覆盖转录准确度，不覆盖声音听起来怎么样。</li>
+<li>一套 Harness，多个任务：同一套 Harness 跑每一次搜索，一个提案带出四个模型的改动。任务与评估器一旦存在，再来一轮 Agent 只花算力，不花某人的一个下午。</li>
+<li>守卫让结果诚实：每次提交都在干净环境里打分，更快但让延迟或词错率变差的候选拿不到奖励。</li>
+<li>证据随改动一起到：每个改动都带一份服务研究与明说的 caveats，大多还带原始基准记录的审计。评审中位仍花约三天半，最多 23 次提交。</li>
+</ul>
+<h2>对推理优化的含义</h2>
+<ul>
+<li>长尾被搜到底：服务栈里每个线程设置、数据转换、启动模式，没人能一个个试完；Agent 能一个个试、一个个测，单个设置值约三分之一吞吐就是这么来的。</li>
+<li>调优变成连续的：任务与评估器一旦存在，新模型、新运行时、新机器形态能再开一轮，而不是另立一个项目。</li>
+<li>结果看部署：同一个改动，8 核上值 +82.9%，16 核上值 +33.6%。Agent 负担得起给每个目标配置各测一遍。</li>
+<li>评估器就是产品：Agent 优化被测量的东西，基准、质量检查、防奖励作弊的守卫成了主要的工程工作。对语音来说，光靠词错率不够。</li>
+</ul>
+<h2>与已收藏文章的联系</h2>
+<ul>
+<li>与 ATOM × Mooncake（5⭐，31 号）同属推理服务优化：ATOM 解决 KV 池共享，这篇解决 Agent 如何自动找到运行时优化。两者都指向同一个结论：推理优化的瓶颈从专家注意力移向算力、评估器与评审带宽。</li>
+<li>与 GB200 NVL72 + Dynamo（4⭐，28 号）对照：Dynamo 是人设计的分解服务（prefill/decode 分离），这篇是 Agent 在已有的分解服务上找零碎开销。系统设计仍是人的事，Agent 吃的是长尾。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
