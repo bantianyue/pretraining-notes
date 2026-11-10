@@ -206,6 +206,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-10</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">32</span>《FlashState》为 Agent LLM 服务解锁灵活的混合状态管理</h3>
+  <p>Agent 请求把上一轮的提示词与输出全带回来，只在末尾加一点，共享前缀越长重算越贵；混合模型复用前缀还要一个位于精确恢复位置的循环检查点，而它不能像 KV 那样截断回滚。FlashState 用任意状态检查点（ASC）把检查点放在任意 token 位置，再用依赖感知的 GDS 优先级 H(u) = stamp(u) + ρ(u) 同时管准入与逐出：B200 上编码 Agent 负载，GLM-5.3-Flash、Nemotron 3 Super、Qwen3.8-Flash-Next 的 prefill 吞吐最高达到 vLLM 的 3.14 倍、2.27 倍与 1.54 倍，p90 首 token 时间分别降低 88.4%、77.1% 与 79.0%。KV 块越大省得越多，未缓存 token 中位减少 72% 到 87%；32 会话下 ASC 配 LRU 反而低于 vLLM，准入与逐出必须一起选。</p>
+  <div class="links">
+    <a class="cn" href="pages/flashstate.html">中文精读 →</a>
+    <a class="en" href="https://www.alphaxiv.org/pdf/2611.flashstate">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-10</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
