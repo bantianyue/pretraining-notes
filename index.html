@@ -216,6 +216,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-10</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">33</span>SGLang megakernel：Muse Spark Open 的 ultrafast decoding</h3>
+  <p>一层 attention 加 MoE 只发一个 kernel：144 个 SM 各驻一个 12 warp 的 block，访存、计算与跨卡通信全程重叠，每步 launch 从 1450 次降到 97 次；指令缓存只约 128KB、kernel 215-314KB，靠 L2 预热、循环不展开与 dry-run 破局；跨 GPU 握手不用系统级 fence，数据本身就是 flag；8 张 GB300 上单请求解码 517 冲到 1109 tokens/s，每步 12.9ms 降到 5.9ms。边界：只支持 batch size 1。</p>
+  <div class="links">
+    <a class="cn" href="pages/sglang-megakernel.html">中文精读 →</a>
+    <a class="en" href="https://www.lmsys.org/blog/2026-11-05-muse-spark-open-ultrafast">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">GPU Kernel 优化</span><span class="tag">推理优化</span><span>收藏于 2026-11-12</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
@@ -426,6 +436,16 @@
     <a class="en" href="https://index.openrsi.foundation/blog/2026/openrsi-sglang-omni/">英文原文</a>
   </div>
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">AI Agent</span><span>收藏于 2026-11-10</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">34</span>vLLM EPD：Encoder Disaggregation</h3>
+  <p>Encoder、Prefill、Decode 拆成独立部署的实例：Encoder 算好的布局元数据还给 Router，下游只收 metadata-only 引用重建 placeholder，embedding 经 EC connector 另外传输，不再重复预处理；专用执行路径只加载 Encoder 权重分片，Kimi-K3 剪枝 checkpoint 加载从 683s 降到 0.31s；Mooncake Store 跨 Encoder 共享 embedding，128 请求里重复编码从 512 次降到 0；DeepSeek V4.1 Flash 并发 64-128 时每 GPU 吞吐高 6.6-9.5%，P90 首 token 时间低 44-47%。</p>
+  <div class="links">
+    <a class="cn" href="pages/vllm-epd.html">中文精读 →</a>
+    <a class="en" href="https://vllm.ai/blog/2026-11-11-encoder-disaggregation-epd">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">多模态服务</span><span>收藏于 2026-11-12</span></div>
 </div>
 
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
