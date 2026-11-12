@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM EPD：Encoder Disaggregation · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM EPD：Encoder Disaggregation</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vllm.ai/blog/2026-11-11-encoder-disaggregation-epd">https://vllm.ai/blog/2026-11-11-encoder-disaggregation-epd</a></div>
+<h1>vLLM EPD：Encoder Disaggregation · 中文精读</h1>
+<blockquote>
+<p>原文：https://vllm.ai/blog/2026-11-11-encoder-disaggregation-epd（vLLM 官方博客）
+精读日期：2026-11-12 ｜ 主题：并行策略（推理）、推理优化、多模态服务、KV 缓存</p>
+</blockquote>
+<h2>0. 一句话：EPD 是什么</h2>
+<p>多模态推理在语言模型执行前多了一个编码阶段：图片、视频帧、音频要先变成 embedding。vLLM 把 <strong>Encoder、Prefill、Decode 拆成独立部署的实例（EPD）</strong>，Encoder 算好的布局元数据直接还给 Router，下游 P/PD 只收 metadata-only 引用重建 placeholder，embedding 经 EC connector 另外传输，不再重复拉取、解码与预处理。</p>
+<p>DeepSeek V4.1 Flash 实测（GB200、512 道 MP-DocVQA、并发 64-128）：每 GPU 吞吐高 6.6-9.5%，P90 首 token 时间低 44-47%。</p>
+<h2>1. 为什么要把 Encoder 单独拆出来</h2>
+<p>不拆的时候，Encoder 嵌在 P 实例里，带来三个问题：</p>
+<ol>
+<li><strong>资源错配</strong>：Encoder 是视觉/音频编码器，与语言模型的算力配比不同，绑在一起扩缩容只能一起扩；</li>
+<li><strong>重复预处理</strong>：每个 P 实例收到请求都要自己拉取媒体、解码、编码，同一份媒体被算很多次；</li>
+<li><strong>启动代价</strong>：P 实例要加载整份 checkpoint，含 Encoder 权重分片，加载慢、占显存。</li>
+</ol>
+<p>拆出来之后，Encoder 实例只干编码，P/PD 实例只干语言模型，各自独立扩缩容。</p>
+<h2>2. metadata-only 请求：下游不再重复预处理</h2>
+<p>这是 EPD 的核心机制。流程是：</p>
+<ol>
+<li>Router 把请求发给 Encoder 实例；</li>
+<li>Encoder 编码媒体，算好<strong>布局元数据</strong>：图像的 image_grid_thw、视频的时间戳、音频的 token 数；</li>
+<li>元数据还给 Router，Router 再发给 P/PD 实例；</li>
+<li>P/PD 只收<strong>引用</strong>，按元数据重建 placeholder（占位符），embedding 本身经 EC connector 另外传输；</li>
+<li>语言模型直接消费 placeholder + embedding，<strong>不再拉取媒体、不再解码、不再编码</strong>。</li>
+</ol>
+<p>音频实测：吞吐 62.21 涨到 73.13 requests/s，平均延迟 980 降到 853ms，准确率 75.90% → 75.65%（基本持平）。</p>
+<h2>3. 专用执行路径：Encoder 实例只加载自己要的权重</h2>
+<p>Encoder 实例跑独立的 <strong>MMEncoderModelRunner</strong>：</p>
+<ul>
+<li>不跑语言模型、不维护 KV 缓存、不做 token 采样；</li>
+<li>只加载 Encoder 权重分片：Kimi-K3 的剪枝 checkpoint 加载从 683s 降到 0.31s（96 分片读 2 个）；</li>
+<li>另有 encoder-only CUDA Graph，进一步压低单次编码的 launch 开销。</li>
+</ul>
+<p>该 runner 在不依赖 token 采样的前提下管理 GPU 完成，避免 Encoder 工作还在途时过早复用 buffer。</p>
+<h2>4. 远程传输：embedding 怎么到 P/PD</h2>
+<p>embedding 不走请求体，走 <strong>EC connector</strong>（Encoder Connector）：</p>
+<ul>
+<li>传输形状：按 token 块分片，支持流式；</li>
+<li>传输失败：有重试与回退路径，失败时 P/PD 可以退回本地编码；</li>
+<li>与 KV 传输的关系：EPD 复用 vLLM 已有的 P/D 分离传输基础设施（KVConnector），embedding 传输是同一套思路在多模态上的延伸。</li>
+</ul>
+<h2>5. 跨 Encoder 复用：Mooncake Store</h2>
+<p>不同 Encoder 实例之间也可以共享已算好的 embedding。<strong>Mooncake Store</strong> 是一个跨实例的共享存储：</p>
+<ul>
+<li>128 个请求、512 张图的场景里，重复编码从 512 次降到 0；</li>
+<li>TTFT p50 从 1.209s 降到 0.819s，p90 从 1.656s 降到 0.891s；</li>
+<li>GPU 视频处理 +94-115%（30 帧 MMVU、4 卡 GB200、Qwen3.5-35B-A3B、1E+3PD 配置）。</li>
+</ul>
+<p>同一份媒体只编码一次，是 EPD 在重请求场景下的主要收益来源。</p>
+<h2>6. 编排与路由：四路方案</h2>
+<p>EPD 的部署编排有四种路线，覆盖从轻量到生产的不同阶段：</p>
+<ol>
+<li><strong>Python EPD 代理</strong>：最轻量的代理层，适合快速验证；</li>
+<li><strong>vLLM Router</strong>：官方 Router，支持 EPD 的 metadata-only 路由；</li>
+<li><strong>SMG</strong>：服务网格方案，适合已有网格基础设施的部署；</li>
+<li><strong>llm-d</strong>：Kubernetes 原生的推理平台，EPD 作为其中的一类工作负载。</li>
+</ol>
+<p>四路的共同点：Encoder 与 P/D 各自独立扩缩容，Router 按负载决定把请求发给哪个 Encoder 实例。</p>
+<h2>7. 边界：拆分本身不是收益</h2>
+<p>DeepSeek V4.1 Flash 的实测把收益与边界一起钉在了数字上：</p>
+<ul>
+<li>并发 64-128：每 GPU 吞吐高 6.6-9.5%（12 卡计入），P90 TTFT 低 44-47%；</li>
+<li>并发 16：EPD 的每 GPU 吞吐<strong>反而更低</strong>；</li>
+<li>并发 32：打平。</li>
+</ul>
+<p>是否拆 Encoder，取决于负载形态与资源切分：媒体越重、Encoder 越是瓶颈，拆分的收益越大。下一步的协调工作（P 的需求抑制不必要的上游编码）与可观测性，正是让这笔账在生产环境算得清楚的前提。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
