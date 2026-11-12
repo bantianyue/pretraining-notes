@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang megakernel：Muse Spark Open 的 ultrafast decoding · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang megakernel：Muse Spark Open 的 ultrafast decoding</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-05-muse-spark-open-ultrafast">https://www.lmsys.org/blog/2026-11-05-muse-spark-open-ultrafast</a></div>
+<h1>SGLang megakernel：Muse Spark Open 的 ultrafast decoding · 中文精读</h1>
+<blockquote>
+<p>原文：https://www.lmsys.org/blog/2026-11-05-muse-spark-open-ultrafast（LMSYS 博客，SGLang 团队）
+精读日期：2026-11-12 ｜ 主题：GPU Kernel 优化、低精度量化（NVFP4）、推理优化、Kernel 融合</p>
+</blockquote>
+<h2>0. 一句话：megakernel 是什么</h2>
+<p>SGLang 团队给 Muse Spark Open 从零写了一个 megakernel：<strong>每层 attention 加 MoE 只发一个 kernel</strong>。一个常驻 kernel 里，12 个 warp 各司其职，访存、计算与跨卡通信全程重叠。8 张 GB300 上，单请求解码从 517 tokens/s 冲到 1109 tokens/s（2.1 倍），每步 launch 从 1450 次降到 97 次，每步耗时从基线 12.9ms 降到 5.9ms。</p>
+<p>背后的判断是：推理引擎的下一个形态可能不再是一串 kernel，而是一个常驻 GPU、自己调度自己的虚拟机——团队把 megakernel 称为"GPU 上的操作系统"。</p>
+<h2>1. 模型：Muse Spark Open 的一层长什么样</h2>
+<p>Muse Spark Open 是 MoE 模型，解码时每层要走 attention、MoE 专家、再回到下一层的 qkv 投影。传统做法是把每一小步拆成独立 kernel：RMSNorm、QKV 投影、attention、MoE dispatch、combine、输出投影……每步 1450 次 launch，每次 launch 都有固定开销，kernel 之间还要等前一个写完、下一个才能读。</p>
+<p>megakernel 把切分点挪到"一层 attention 到下一层 qkv"：<strong>一层只发一次 kernel</strong>，144 个 SM 各驻一个 12 warp 的 block，KV 预取、权重预取、tensor core 计算、指令缓存预热与 NVLink 收发并行。</p>
+<h2>2. 12 个 warp，各有分工</h2>
+<p>一个 block 里的 12 个 warp 不是齐步走，而是分工协作：</p>
+<ul>
+<li><strong>访存 warp</strong>：提前把下一层要用的权重与 KV 预取进各级缓存；</li>
+<li><strong>计算 warp</strong>：tensor core 跑 GEMM 与 attention；</li>
+<li><strong>通信 warp</strong>：管跨卡的 NVLink 收发，专家交换的数据在后台流动；</li>
+<li><strong>同步 warp</strong>：用轮询与 flag 做跨 GPU 握手，不用系统级 fence。</li>
+</ul>
+<p>分工的意义在于<strong>重叠</strong>：profiling 显示 GEMM 2 在 GEMM 1 结束前就已启动，权重流式传输、计算与通信在同一时间片里发生。</p>
+<h2>3. 权重预取要分层</h2>
+<p>权重不依赖上一层，warp 0 可以在当前操作还没完成时就开始预取下一层权重。预取分层走：</p>
+<ul>
+<li>L2 层面的大块搬运；</li>
+<li>SM 共享内存层面的分块；</li>
+<li>寄存器层面的最后一级。</li>
+</ul>
+<p>关键点是<strong>预取不能抢计算的带宽</strong>：流式传权重时，一次轮询的加载要排在 bulk 拷贝后面 1.0-2.6µs；空转的 warp 还会抢干活 warp 的发射槽位与内存请求。忙等不理想，但硬件只给了这个办法。</p>
+<h2>4. 指令缓存：大 kernel 的诅咒</h2>
+<p>单个 SM 只缓存约 128KB 指令，而 megakernel 有 215-314KB。kernel 一大，指令缓存未命中就成了减速项。破局办法有三件套：</p>
+<ol>
+<li><strong>每 launch 把代码当数据读进 L2 预热</strong>；</li>
+<li><strong>循环不展开</strong>，控制代码体积；</li>
+<li><strong>dry-run</strong>：先跑一遍把指令缓存热起来。</li>
+</ol>
+<p>教训是：指令缓存要当作稀缺资源管，kernel 越大越要算这笔账。</p>
+<h2>5. 同步不用 fence，数据即 flag</h2>
+<p>跨 GPU 握手不用系统级 fence。教科书式的跨卡交接是"写数据、发一条内存 fence、再发 flag"，每次 fence 要 3.6-4.0µs。megakernel 的做法是：<strong>接收槽位先填永不出现的特殊值，数据本身就是 flag</strong>——读端看到特殊值消失，就知道数据到了。</p>
+<ul>
+<li>SM 内轮询要 141-145ns；</li>
+<li>同一节点内两张卡之间的单向 flag 约 1.9µs；</li>
+<li>专家交换的缓冲区有两份，逐层轮换：空闲的那份在另一份使用时被重置为"空"；其余交接的槽位由读端用完后立即重置。</li>
+</ul>
+<p>每层只需一次 fence，而且不在关键路径上。</p>
+<h2>6. 推测解码：草稿模型也 megakernel 化</h2>
+<p>megakernel 的验证步每步验证 16 个 token、平均接受 6.6 个。对比小米的 MiMo-V2.5-Pro：每步验证 8 个 token、平均接受 6.3 个，已经冲过 1000 tokens/s。16 个 token 验证起来更贵、会激活更多专家，但实测下来，用 16 个 token 拿到这个接受长度，比用 8 个更划算。</p>
+<p>草稿模型本身也用同样的思路激进融合：SGLang 原来把草稿模型跑成 175 个 kernel，5 层每层一次 launch 后，草稿模型快了 2.6 倍，每步从 1.16ms 降到 440µs。</p>
+<h2>7. 性能：一步解码的耗时对比</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>基线</th>
+<th>megakernel</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>每步总耗时</td>
+<td>12.9ms</td>
+<td>5.9ms</td>
+</tr>
+<tr>
+<td>草稿</td>
+<td>1.16ms</td>
+<td>0.44ms</td>
+</tr>
+<tr>
+<td>验证</td>
+<td>10.9ms</td>
+<td>5.3ms</td>
+</tr>
+<tr>
+<td>kernel 数</td>
+<td>1450</td>
+<td>97</td>
+</tr>
+</tbody>
+</table>
+<p>单请求解码 517 → 1109 tokens/s。整个 megakernel 的代码约 8000 行 CUDA 加 PTX。</p>
+<h2>8. 边界与下一步</h2>
+<p>团队把边界说得很清楚：</p>
+<ul>
+<li><strong>今天只支持 batch size 1</strong>。批量放大后，等待会被就绪的活盖住，优化的重心会变；</li>
+<li>做到"GPU 上的操作系统"那一步，<strong>调度要在运行时决定哪个 warp 跑什么</strong>，而不是编译时定死。</li>
+</ul>
+<p>三条可复用的判断：kernel 该在"一层 attention 到下一层 qkv"处切开；预取要分层、指令缓存要当作稀缺资源管；跨卡同步能不用 fence 就不用 fence。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
