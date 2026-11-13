@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang-Neuron v0.1.0：SGLang 的服务栈登上 AWS Trainium · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang-Neuron v0.1.0：SGLang 的服务栈登上 AWS Trainium</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-12-sglang-neuron-v0.1.0">https://www.lmsys.org/blog/2026-11-12-sglang-neuron-v0.1.0</a></div>
+<h1>SGLang-Neuron v0.1.0：SGLang 的服务栈登上 AWS Trainium</h1>
+<ul>
+<li>原文：SGLang-Neuron v0.1.0: SGLang's Serving Stack on AWS Trainium（LMSYS，2026-11-12）</li>
+<li>原文链接：https://www.lmsys.org/blog/2026-11-12-sglang-neuron-v0.1.0</li>
+<li>作者：SGLang Team and AWS Annapurna Labs（RadixArk 与 Amazon Annapurna Labs 共建）</li>
+<li>星级：4⭐（推理服务化、非 NVIDIA 硬件后端；机制完整但无端到端吞吐对比表）</li>
+<li>一句话要点：SGLang 的服务栈以 PyTorch 原生插件形态跑上 Trainium：全异步运行时让解码步背靠背不空转，Megakernel 把一步每层压进一次 NKI 核调用，PD 分离与 HiCache 分别解决跨节点 KV 搬运与逐出前缀重算。</li>
+</ul>
+<h2>背景：为什么是 Trainium</h2>
+<p>Trainium 是 AWS 的 AI 芯片系列，主打大规模训练与推理的性价比。SGLang-Neuron v0.1.0 是 SGLang 在 Trainium 上的后端首个公开版本，公测开源，接续 10 月宣布的封闭测试。测试证明 SGLang 的模型组件经 TorchNeuron 能搬到 Trainium 上；这次发布解决的是怎么把它跑快。</p>
+<p>Neuron 把模型编译成跑在 Trainium NeuronCore 上的程序，工作经启动队列到达这些核，最快的路径是手写 NKI 核。v0.1.0 的工程集中在三处：步子怎么起、一步里能装进一个核多少、KV 缓存不在设备上时放哪。</p>
+<h2>插件架构：分工很严格</h2>
+<p>SGLang-Neuron 是一个树外插件。安装后经 SGLang 的插件入口注册一个 neuron 平台，启动时 <code>SGLANG_PLATFORM=neuron</code> 选中它。</p>
+<p>分工：SGLang 核心负责 API 服务、调度器、基数缓存与分离式服务协议；插件提供 SGLang 向每个硬件平台索要的东西：</p>
+<ul>
+<li><strong>Neuron 模型实现</strong>，登记在模型目录里：目录在服务启动前检查 checkpoint、并行布局与标志位，所有模型共用一条启动路径。</li>
+<li><strong>NKI 核</strong>：注意力、MoE、投影，以及整步 megakernel。</li>
+<li><strong>设备并行</strong>：张量并行、专家并行、数据并行，外加最大模型用的流水线并行与解码上下文并行。</li>
+<li><strong>图运行器</strong>，带编译管理器与分桶器：Trainium 跑编译好的程序（NEFF），运行器编译一组固定形状桶，每步派发到匹配的那个。</li>
+<li><strong>KV 缓存池</strong>：MHA 模型用分页全 KV 池，MLA 与 DSA 注意力用各自的潜变量池。</li>
+<li><strong>推测解码</strong>，以及跑在设备上的采样器。</li>
+</ul>
+<p>底下是 TorchNeuron，AWS 给 Trainium 做的原生 PyTorch 后端：把 Trainium 注册成 PyTorch 设备做 eager 执行，也做 TorchDynamo 后端，<code>torch.compile</code> 的图经 Neuron 编译器下沉；NKI 核插进同一张编译图。每个 SGLang 调度器 rank 绑定自己的 NeuronCore，在上面建模型与 KV 池。</p>
+<h2>全异步运行时：设备永不空闲</h2>
+<p>所有支持的 LLM 共用一条全异步执行路径，目标一句话：设备在两步之间永不空闲。</p>
+<p>朴素路径的问题：单流上，两张图之间的一次主机拷贝要等第一张图跑完，再堵住第二张，NeuronCore 在主机搬几个张量时空着。运行时的 <code>device_io</code> 层用两个流、两个分工修好它：</p>
+<ul>
+<li><strong>默认流跑图，边流跑所有主机拷贝</strong>：两者永不互相排队。</li>
+<li><strong>上传与上一步重叠</strong>：一步的输入在图启动前就排进边流，图提交只等一个事件，上传就在上一张图还在设备上时跑完。</li>
+<li><strong>读回永不阻塞</strong>：读回只在图启动事件之后才排队，不会卡在一张正在跑的图后面；采样的 token 很小，直接读。</li>
+<li><strong>两次启动保持在途</strong>：<code>SGLANG_NEURON_MAX_INFLIGHT_LAUNCHES</code> 给每个线程定上限，默认 2；调度器能在第 n 步跑完之前就启动第 n+1 步。</li>
+</ul>
+<p>效果是 GPU 用户熟悉的那个思路的 Trainium 版：把主机开销藏在设备工作后面。这里主机工作藏在启动队列后面，不是 CUDA 流，而且适用于插件上的每个模型，不是一条调优过的专用路径。</p>
+<h2>Megakernel：一步每层一个核</h2>
+<p>默认情况下，编译器把每个解码步下沉成一张由很多小核组成的图，核的起止由编译器定，中间结果回 HBM。Megakernel 反过来：一步里每个解码层都在一次 NKI 核调用里跑完。权重经插件按前导层轴打包，KV 池就地写入；一步不再是一张核边界由编译器定的小核之图，而是一个内存搬运全程可控的核。</p>
+<p>平台执行方式不变：每个阶段仍是一张经 Neuron 后端的 <code>torch.compile</code> 图，一次调用核，解码族直接提交到绑定的执行器。SGLang 仍掌管步子之上的全部：调度、KV 缓存、PD 分离与结果处理不变。Megakernel 在一个叫 MegakernelSpec 的契约下规划与执行整步：一个契约，新模型不再需要新的运行时子类。</p>
+<ul>
+<li><strong>GPT-OSS-120B</strong> 是第一个走这条路的模型：解码在 Trainium3 上经一个核跑，上面叠加流水线并行与解码上下文并行。</li>
+<li><strong>GLM-5.2</strong> 的 prefill 与 decode 都用 megakernel。</li>
+<li><strong>Kimi-K3</strong> 的 prefill 有专用 NKI 核。</li>
+</ul>
+<h2>PD 分离：EFA 上的 NIXL</h2>
+<p>在 Trainium 上，prefill 与 decode 分开做服务器最好：prefill 服务器算提示词的 KV 缓存与第一个 token，再经 NIXL WRITE 在 EFA 上直接写进 decode 服务器的池。部署里任意数量的两种服务器放在均衡器后面（xPyD）。分开有三个理由：</p>
+<ul>
+<li><strong>一个阶段一台服务器</strong>：每台服务器只编译与热身自己那个阶段的图；聚合式服务器每次在 prefill 与 decode 之间切换都要付一次程序切换栅栏，分开的服务器永不付。</li>
+<li><strong>TPOT 稳定</strong>：两个解码步之间不再插进一次 prefill 前向，每输出 token 的时间保持在中位数。</li>
+<li><strong>每个阶段一套布局</strong>：prefill 与 decode 想要不同的拓扑，每个角色拿自己的 TP、EP、DP 布局，prefill 与 decode 服务器各自独立扩容。</li>
+</ul>
+<p>两角色的服务画像不同：prefill 一次前向一个请求，按编译时确定的尺寸，每次前向都在上一次跑完前启动，每核 32 个排队执行盖住长 prefill 前向，流水线 prefill 在 KV 传输前面算；decode 步子一直接着一步，采样 token 留在设备上，传输 worker 与 NIXL 进度线程把进来的 KV 落在正在跑的图旁边，请求在 KV 落地后加入正在跑的批。模型可以用 128K 与 1M 这样的具名解码点：两个角色用同一个点启动，两边的编译形状就对得上。</p>
+<h3>Kimi-K3：三台 Trainium3 节点</h3>
+<p>Kimi-K3 是这次发布里最大的部署，跑在三台 Trainium3 节点上：</p>
+<table>
+<thead>
+<tr>
+<th>角色</th>
+<th>节点</th>
+<th>布局</th>
+<th>跑什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Prefill</td>
+<td>1</td>
+<td>PP8 × TP16 × DCP16</td>
+<td>厂商提供的 NKI prefill 核、分块键控前缀缓存、HiCache</td>
+</tr>
+<tr>
+<td>Decode</td>
+<td>2</td>
+<td>DP8 × TP32 × DCP32</td>
+<td>DSPark 推测解码，跑在模型自己的推测 worker 上</td>
+</tr>
+</tbody>
+</table>
+<p>Kimi-K3 用 FP8 的 MLA 注意力配 MXFP4 专家，KV 放在 MLA 潜变量池里，不走分页 MHA 池；prefill 侧跨 8 个阶段流水线化，decode 侧跨两节点，解码上下文并行到 32。这个配置在 4K 到 1M 混合提示词、满槽位、真实推测接受率下，达到<strong>每用户 67 tokens/s</strong>。</p>
+<h3>GLM-5.2：1M 上下文</h3>
+<p>GLM-5.2（MXFP4）是带 DSA 注意力的 MoE 模型，在 Trainium3 上分离式服务，megakernel prefill 与 decode、MTP 推测解码、128K 与 1M 解码点，跑在公开的 Neuron SDK 2.33.0 上。1M 解码点瞄准编码智能体这类长上下文负载：会话上下文随轮次一直增长，流水线 prefill 在 KV 交接前面算，第一个 token 不用等交接完成。</p>
+<h2>HiCache：KV 缓存下的 DRAM 层</h2>
+<p>智能体负载反复发越来越长的前缀：设备池一满，基数缓存就要逐出，被逐出的前缀下次命中通常意味着整段重算。HiCache 给这些页一个去处：启用分层缓存后，SGLang 把被逐出的基数缓存页留在主机内存里，之后命中再加载回来。基数树、主机分配器与传输引擎都是上游 SGLang 代码，插件只提供主机池，按 Trainium 搬运内存的方式建：</p>
+<ul>
+<li><strong>整页、层优先</strong>：池子是一块钉住的主机缓冲，整页布局，MHA 模型是 [2 × 层数][页][每页字节]，MLA 与 DSA 池每层一个区；这个布局匹配 Neuron 编译器的访问模式。</li>
+<li><strong>批量 DMA 贴着图跑</strong>：页用 <code>nrt_tensor_read_batch</code> 与 <code>nrt_tensor_write_batch</code> 搬运，一次传输一次调用，每个方向一个专用线程；一次存储只等在它之前启动的图。</li>
+<li><strong>解码不停</strong>：聚合式服务器上，调度器握住等加载的那批，正在跑的那批继续解码。</li>
+</ul>
+<p>在 GPT-OSS-120B、TP8、32K 上下文上，HiCache L2 带来多 <strong>72% 到 75%</strong> 的输出吞吐。v0.1.0 还在 L2 之下加了一层远程 DRAM，经 NIXL LIBFABRIC 到达：会话长过本地主机池时，页溢出到另一台节点的内存，而不是被丢掉；主机预算在节点内各 rank 与 <code>--dp-size</code> 副本之间共享，副本不会超额预定同一块 DRAM。</p>
+<h2>扩散模型也上了 Trainium</h2>
+<p>v0.1.0 还把图像、视频、机器人动作与世界模型带到 Trainium。SGLang Diffusion 得到了一个 Neuron 平台，安装 torch-neuronx 后自动选中；SGLang 仍跑启动器、调度器、图像与视频 API、实时 WebSocket 协议，插件提供管线、编译好的图与 NKI 核。</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>落地内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FLUX.1-dev</td>
+<td>文生图：扩散平台、NKI 核与张量并行层</td>
+</tr>
+<tr>
+<td>MiniMax-H3</td>
+<td>t2va 与 fl2va 模型与管线</td>
+</tr>
+<tr>
+<td>Wan2.2 A14B</td>
+<td>T2V 与 I2V 模型与管线</td>
+</tr>
+<tr>
+<td>FLUX.3-Action</td>
+<td>跑在 SGLang Diffusion 自己的管线上</td>
+</tr>
+<tr>
+<td>LingBot-World-V2</td>
+<td>实时服务：带分页缓存注意力的 DiT、LNC 1 启动、流式 Wan VAE</td>
+</tr>
+</tbody>
+</table>
+<p>五个模型全用 BF16 权重，跑在一台 trn2.48xlarge 上，各自在配方里按参考做精度门控。</p>
+<p>三个值得注意的工程点：</p>
+<ul>
+<li><strong>环面上的分组</strong>：一台 trn2.48xlarge 的 16 颗芯片组成 4×4 环面，一个集合通信只有芯片组成环时才可路由。SGLang 的 rank 生成器上一个小 hook 改了 rank 命名，让每个 TP 分组落在网格的一行里，每个 CP 分组落在列里：rank 保住自己的核，SGLang 其余部分一字不动。</li>
+<li><strong>整静态图</strong>：每个组件经插件里一个小 Dynamo 后端编译成一张整静态图，后端还按图设编译标志；引导尺度、时间步与采样器系数以设备张量的形式进图，请求之间改它们不再重新编译。</li>
+<li><strong>世界模型当 LLM 服务</strong>：LingBot-World-V2 把因果历史放在带注意力汇与近期窗口的分页 K/V 缓存里，由分页 FlashAttention NKI 核读取；DiT 跑在自己的核上，另一组核跑文本编码器与流式 VAE，一个 chunk 解码时 DiT 就在处理下一个；客户端经 SGLang 的实时视频 WebSocket 连接，与 GPU 上是同一套协议。</li>
+</ul>
+<h2>覆盖面：功能与模型</h2>
+<p>功能覆盖（Trainium2 与 Trainium3，除非注明）：全异步运行时、设备上采样器、按形状分桶的图运行器；数据、张量、专家并行，流水线并行，解码上下文并行；NKI 注意力、MoE 与投影核，MoE 用的节点级 all_to_all，整步 megakernel；基数缓存、分块键控前缀缓存、HiCache L2、经 NIXL 的远程 DRAM 层；prefill 与 decode 分离（xPyD），KV 经 NIXL 在 EFA 上走，具名解码点；MTP 与 DSPark 推测解码；BF16、FP8 与 MXFP4 checkpoint，FP8 KV 缓存；SGLang Diffusion 带 Neuron 平台（Trainium2，trn2.48xlarge）。</p>
+<p>支持的 LLM：Kimi-K3.1（DSA 潜变量池加 KDA 状态；流水线每个阶段的每个 PD 角色跑本阶段的 megakernel）、Kimi-K3（FP8 MLA、MXFP4 专家；流水线 prefill、两节点 decode、推测解码）、GLM-5.3 与 GLM-5.3-Flash（Flash：带 MLA 与 DSA 池的 KDA 状态）、GLM-5.2（MXFP4，带 DSA 的 MoE；megakernel prefill 与 decode；128K 与 1M 解码点；MTP）、Qwen3.5（带门控 delta net 状态的 MoE）、Qwen3-0.6B/8B/30B-A3B（稠密与 MoE；聚合式与 PD 服务）、GPT-OSS-120B（MoE、MXFP4；megakernel decode；流水线与解码上下文并行；DP 注意力解码）、GLM-4-9B（稠密；聚合式与 PD 服务）、DeepSeek-V2-Lite（MLA 注意力；PD 服务）。</p>
+<h2>RL rollout 与上手</h2>
+<p>服务只是 RL 后训练循环的一半。Miles 是 RadixArk 的开源 RL 框架：用 SGLang 生成 rollout，经可插拔后端训练，再把更新后的权重送回引擎。在 Trainium 上，Miles 经 TorchNeuron 上的 TorchTitan 后端训练，与 SGLang-Neuron 服务用的同一套 PyTorch 栈；整条循环在 Qwen3-30B-A3B 上端到端验证过，rollout 由 SGLang-Neuron 服务，训练走 TorchTitan 后端。</p>
+<p>上手：Trainium2 或 Trainium3 实例上，<code>docker run</code> 拉起 <code>public.ecr.aws/neuron/pytorch-inference-sglang-neuron:v0.1.0-neuron-py314-sdk-2.33.0-ubuntu26.04</code> 容器，<code>python3 -m sglang.launch_server --model-path /models/gpt-oss-120b --tp-size 8 --ep-size 8 --kv-cache-dtype fp8_e4m3</code>，再 <code>curl</code> 发请求。仓库里有完整安装指南、各模型配方与验证过的配置。</p>
+<p>下一步四件事：递推状态框架（Qwen3.5 与 GLM-5.3-Flash 走与 Kimi-K3.1 同一条 MegakernelSpec 路径）；一个核包契约（每个核包注册时带戳与声明的旋钮集合，启动时拒绝任何未钉死的配置）；Kimi-K3.1 推测解码；一个主机模式（Kimi-K3 与 GLM-5.2 上了 MegakernelSpec 后，五个运行时子类收敛成平台运行时加声明的阶段程序，核工作变成自包含任务）。</p>
+<h2>关键数字</h2>
+<ul>
+<li>Kimi-K3 三节点 PD 分离：<strong>每用户 67 tokens/s</strong>（4K 到 1M 混合提示词，满槽位，真实推测接受率）。</li>
+<li>HiCache L2：GPT-OSS-120B、TP8、32K 上下文，输出吞吐多 <strong>72% 到 75%</strong>。</li>
+<li>GLM-5.2：MXFP4，<strong>1M 上下文</strong>，128K 与 1M 解码点，Neuron SDK 2.33.0。</li>
+<li>异步运行时：<code>SGLANG_NEURON_MAX_INFLIGHT_LAUNCHES</code> 默认 2；prefill 每核 32 个排队执行。</li>
+<li>Kimi-K3 布局：prefill PP8 × TP16 × DCP16（一节点），decode DP8 × TP32 × DCP32（两节点）。</li>
+<li>扩散模型：五个全 BF16，一台 trn2.48xlarge，16 芯片 4×4 环面。</li>
+</ul>
+<h2>与 GPU 上 SGLang 的对照</h2>
+<p>同一个 SGLang 核心，换一层硬件抽象：GPU 上是 CUDA 流与 CUDA 图，Trainium 上是启动队列与 NEFF；Megakernel 的思路与 vLLM/SGLang 在 GPU 上的一步一核方向一致，只是实现落在 NKI 而不是 CUDA kernel；HiCache 的分层思路与 SGLang 在 GPU 上的分层 KV 缓存一致，区别在主机池布局要匹配 Neuron 编译器的访问模式。非 NVIDIA 硬件后端的价值不在峰值数字，而在同一套服务语义（调度、基数缓存、PD 分离、推测解码）能不能原样搬过去：v0.1.0 的答案是能，而且 MegakernelSpec 把新模型接入收敛成一个契约。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
