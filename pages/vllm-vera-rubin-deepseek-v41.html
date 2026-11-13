@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 在 Vera Rubin NVL72 上跑 DeepSeek-V4.1-Flash：58 倍吞吐的三层改造 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM 在 Vera Rubin NVL72 上跑 DeepSeek-V4.1-Flash：58 倍吞吐的三层改造</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin</a></div>
+<h1>vLLM 在 Vera Rubin NVL72 上跑 DeepSeek-V4.1-Flash：58 倍吞吐的三层改造 · 中文精读</h1>
+<blockquote>
+<p>原文：https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin（vLLM 官方博客，Inferact 与 vLLM 团队，2026-11-12 发表）
+精读日期：2026-11-13 ｜ 主题：推理优化、GPU kernel、KV Cache、并行策略（推理）、低精度量化</p>
+</blockquote>
+<h2>0. 一句话：58 倍是三层改动叠出来的</h2>
+<p>一块 NVIDIA Vera Rubin NVL72 机柜上，vLLM 跑 DeepSeek-V4.1-Flash，在 SemiAnalysis AgentX 负载下每 GPU 1.7M tokens/s，每用户 P90 387 tokens/s，相对 GB300 NVL72 同等交互水平快 58 倍；峰值 2.52M tokens/s/GPU，单用户 1810 tokens/s。</p>
+<p>三层改动：<strong>核按 Rubin 硬件重写（双内存域 + SM107 宽 FP4 MMA），prefill 步快 28%、decode 步快 25%；专用 TP8 低延迟 decode 路径把小核链的边界融掉，每用户 P50 输出从 1117 升到 1844 tokens/s；内存池收到机柜级，Mooncake KV 池 + Engram 表 + Dynamo 路由，4800 并发下 TTFT P50 从 29.8 秒压到 4.2 秒。</strong> 这是 DeepSeek-V4.1-Flash 系列第三篇，前两篇分别是 day-0 上线与 GB300 机柜的 P/D 分离加 Wide-EP。</p>
+<h2>1. 评测口径：AgentX 与 vllm bench forward</h2>
+<p>评测用 SemiAnalysis AgentX 当代表性 agentic 服务负载，与前两篇对齐。吞吐按总 tokens/s/GPU 计（含输入、缓存命中输入与输出）；交互水平按每用户 P90 生成 tokens/s 计。核与模型前向的计时用 <code>vllm bench forward</code>，走真实 <code>execute_model</code> 路径、真实权重与真实 AgentX token；prefill 核在数秒循环里 A/B 对比，取有差异时的持续值。</p>
+<p>结论数字：Rubin 机柜在 387 tokens/s 每用户时每 GPU 1.7M tokens/s，58 倍于 GB300 NVL72；峰值 2.52M tokens/s/GPU 出现在 201 tokens/s 每用户处；60 倍出现在 530 tokens/s 处；单用户 1810 tokens/s。Rubin 侧标注为预览结果，GB300 侧来自 InferenceX 公开数据，201 与 530 tokens/s 每用户之间的 GB300 点是邻近点插值。另有每 MW 功率归一化视图。</p>
+<h2>2. Rubin 硬件：三条新事实</h2>
+<p><strong>每块 GPU 有两个内存域。</strong> SM 读自家内存域远快于交错内存，从另一内存域读更慢。带宽敏感的数据——MoE 权重、LM head、MegaMoE 的 combine 缓冲、mHC 的残差流——放错域就直接丢带宽。</p>
+<p><strong>SM107 加了更宽的块缩放 MMA 指令。</strong> 新的 K64 混合精度 FP8×FP4 MMA 每条指令做两倍的活，用在 MegaMoE 与低 batch 路由 GEMM 上：MegaMoE 在每 rank 8K+ token 时快 8% 到 11%，低 batch 路由 GEMM 快 12%。索引器里新的 K128 FP4 MMA 配六 token 查询块，让 decode 的 MQA logits 核快 15% 到 22%。</p>
+<p><strong>72 块 GPU 共享一个 NVLink 域。</strong> TP8 可以横跨两个计算托盘，all-reduce 几乎不加成本；prefill 实例之间能高效读对方 HBM，一张大表不必每个实例各存一份。DEP2、DEP16、DEP32 的含义是数据并行注意力加专家并行，分别跨 2、16、32 块 GPU。</p>
+<h2>3. Prefill 核：28% 来自 GEMM 周围</h2>
+<p>GB300 的三种引擎形态保留：DEP2 prefill、Wide-EP decode（DEP16 或 DEP32）、一条 TP 低延迟 decode 路径。DeepSeek 的核集合也保留（MegaMoE、MegaAttn、Mega-mHC、MegaGate、DeepSelect），大部分按 SM107 重建。32K token 每 rank 时，一个 prefill 步主要由专家 GEMM 主导，其余大头是残差与注意力工作集流过 HBM。这一轮改的是 GEMM 周围的核与 Rubin 的两个内存域。</p>
+<ul>
+<li><strong>MegaMoE 按最忙 rank 定 tile。</strong> eager prefill 不 padding DP batch，86% 的真实 DEP2 prefill 步里，空闲 rank 按自己极小的 token 数定 tile，专家却在服务繁忙 rank 的 token。tile 现在取本地与 DP 平均 token 数里较大的那个。40 步重放里 MegaMoE 时间降 55%，空闲 rank 旁边的单请求 TTFT 在 8K 到 32K token 时快 13% 到 39%。</li>
+<li><strong>Mega-mHC 把残差流放进核内内存。</strong> prefill 尺寸下 Mega-mHC 受 HBM 带宽限制，每 token 流过约 100 KB 四路残差。残差现在住在横跨两个内存域的池子里，Mega-mHC 每个域一个任务计数器，各 SM 先排空自家域再帮另一域。大网格因此受指令缓存限制，改成只循环一份 Post 体。Mega-mHC 在 32K token 时从 354 降到 317 微秒每调用；5K+ token 的 DEP2 步快 0.6% 到 1.3%。</li>
+<li><strong>查询 GEMM 上 SM107 的 K64 MMA。</strong> MegaAttn 的查询 GEMM 从 cuDNN 的 SM100 核换到 FlashInfer 的 CuTe DSL GEMM，跑在 SM107 的 K64 MMA 上：4K 到 32K 行快 13% 到 18%，16K 到 32K token 的 DEP2 步省 1.1% 到 1.7%。</li>
+<li><strong>MegaAttn 让张量核不停发。</strong> 空闲 warp 发 SV，QK 不再排在 SV 后面；KV 生产者先取下一块的 top-k 索引再等空位；cluster 启动控制 warp 把下一任务的索引行预取进 L2；下一任务的查询在当前任务最后一个 QK 之前就加载。每个 TMEM lane group 各自完整打分自己的 key，softmax 不再经共享内存换部分和。核在 16K 到 32K token 时快 15%，4K token 时快 23%，DEP2 步省 0.9% 到 2.1%。</li>
+<li><strong>Mega-mHC 的 ticketed 任务环。</strong> 长 prompt 下固定任务步长让 RMSNorm 工人落后 Post 太远，重读 Post 输出时错过 L2。大网格改从原子 ticket 计数器取任务，32K token 时快 18%。Norm 任务提前发出全部 load，下一任务系数提前到，两个 Post warpgroup 共用一份代码省指令缓存：每调用再快 13% 到 22%（4K 到 32K token）。</li>
+<li><strong>MegaGate 每 token 只读一次。</strong> 长 prompt 下一对 CTA 从一个共享内存级算一个 token 块的全部 384 个专家，不再按每 128 专家一组反复读 token。路由器只对仍可能进 top-6 的专家算精确的 sqrt-softplus：第六大分数的上界加函数斜率给每个专家一个阈值，384 个里约 7 个通过。核从 4K token 起快 3% 到 13%，32K token 时从 77 降到 68 微秒。</li>
+</ul>
+<p>六处改动加起来，32K token 的 DEP2 prefill 步快约 28%。</p>
+<h2>4. Decode 核：25% 来自内存路径</h2>
+<p>decode 受 MoE 限制，和 GB300 上一样。相对第一版 Rubin 构建（已有核内权重、Wide-EP dispatch 改动、MQA logits 改动），下面这组优化把 DEP32 decode 步的目标前向（每 rank 20 请求 × 6 token，DSpark k=5，单 4 卡节点模拟）再压约 25%。</p>
+<ul>
+<li><strong>MegaMoE 的专家权重按输出列切分到两个内存域</strong>，各域的 SM 只拿本地 tile。DEP2 decode 前向在 batch 32 时快 10.1%，batch 168 时快 5.5%。</li>
+<li><strong>Wide-EP dispatch 改成每 token 一次 NVLink 往返。</strong> DEP8 decode 时 NVLink 只跑到峰值的 39%。每个拉取的 token 现在先发出全部远程 load 再做任何本地 store，一次往返代替两到三次。warp 用一次 fence 加一次当选 release 发布拉取，专家计数以不返回的 red 原子操作发出，第一个 SM 的 392 次远程更新不再串行。MegaMoE 在 DEP8 快 17%，从 192 降到 160 微秒。</li>
+<li><strong>combine 改成等数据、不等屏障。</strong> combine 缓冲每轮启动时填满一个任何输出都不可能取到的哨兵值，CTA 的 GEMM 任务一完成就合并，只重读仍含哨兵值的 16 字节组再恢复哨兵值。跨 rank 的尾部屏障在一轮结束时发信号、下一轮开始时等待。MegaMoE 在 decode 尺寸下快 3.5% 到 10.8%。</li>
+<li><strong>Split-K GEMM 跑在 SM107 集群上。</strong> 每 rank 只有几十行时，注意力输入与输出投影启动的 CTA 太少，流权重跑不满带宽。Split-K GEMM 把 K 分到 SM107 集群上，部分和经分布式共享内存规约，或在 CTA 的 peer 切片超过 28 KB 时经寄存器走 L2。GEMM 快 10% 到 38%，decode 前向在每 rank 不超过 16 请求时快 3.1%，17 到 24 请求时快 1.9%。</li>
+<li><strong>MQA logits 打包查询行。</strong> DSpark 校验的每请求 5 到 6 个查询行打包成一个 192 宽的块，两个 warpgroup 跑，代替两个 4 token 块、三个 warpgroup；每个 128 维 head 发一次 SM107 的 K=128 MMA，代替两次 K=64；按立即偏移量存储，不再逐 split 算 64 位地址。核在每请求 5 到 6 token 时快 15% 到 22%。</li>
+<li><strong>拆分的 Mega-mHC 只把下一层需要的部分放上关键路径。</strong> 下一层需要 Mega-mHC 的 Post、路由折叠与 RMSNorm，不需要后面的 mix。一个小核只做这三件，mix 在旁路流上跑、在下一个边界汇合。每个路由按合并的 16 字节块移动，每 CTA 最多三个 token，636 个 token 一波装进 212 个 SM。decode 前向在每 rank 20 到 30 请求时快 2.0% 到 4.8%；合并改写让这个核本身在 18 到 192 token 时再快 30% 到 58%。</li>
+<li><strong>MegaAttn decode 加深流水线。</strong> 三块索引 load 与四批 gather 保持在途，空闲查询 warpgroup 在每个 SM 只有一个任务时解包 KV，核在自己的依赖等待刚结束就触发依赖方，让输出投影的 prologue 与注意力重叠。核在 6 到 424 行快 7% 到 10%。</li>
+</ul>
+<h2>5. TP8 低延迟路径：1117 到 1844</h2>
+<p>最低延迟走一条专用 decode 路径，从 GB300 篇移植过来、按 Rubin 大幅重建，横跨两个计算托盘跑 TP8。真实 AgentX 会话在并发 1、DSpark 接受率固定 3.51 token 每步时，每用户 P50 输出从 1117 升到 1844 tokens/s。除了第一个专家 GEMM，一步就是一串接近延迟下限的小核。</p>
+<ul>
+<li><strong>TP8 横跨两托盘跑在 NVL72 上。</strong> 每个 rank 握每个专家的 288 列切片与 8 个注意力头。跨托盘 all-reduce 只比托盘内贵 0.3 微秒，TP8 把每 GPU 的权重读取几乎减半，代价接近零。路由 GEMM 与稀疏 MLA 用原生 TP8 形状，一步快 35%。</li>
+<li><strong>打包 FP4 权重级。</strong> UMMA 描述符只能寻址 256 KB 共享内存，SM100 的单字节 FP4 布局放 7 级。SM107 的 K64 MMA 读打包 FP4，同一空间放 11 级，每步省 57 微秒。LM head 也改成核内：权重副本按两个内存域切分，各 SM 只流自己那一半，接近域内上限。</li>
+<li><strong>两次 all-reduce 与 mHC 合成一趟。</strong> 两次 all-reduce 从 GEMM 收尾直接经 NVLink 组播存储发布进 Lamport 邮箱。接收核加总各 rank、应用 mHC Post、折叠四路、算 RMSNorm，在 MoE 边界还顺手跑路由 GEMM 再等 grid（每步约省 30 微秒）。下一层的 mHC pre-norm 在旁路流上跑，拆 64 份（5.8 降到 3.7 微秒），路由 GEMM 给它留出 212 个 SM 里的 16 个（省 4 到 10 微秒）。</li>
+<li><strong>稀疏 MLA 与共享专家。</strong> 稀疏 MLA 在 TP8 每 rank 跑 8 头核：前一个核还在跑时，它就 gather 除本步新增行外的全部 KV 行，每个 PV 块的 MMA 一完成就把部分结果发给 owner（省 16 到 21 微秒）。查询 RoPE 与 KV 缓存插入融进注意力周围的核，注意力也提前启动 prologue（再省 36 微秒）。共享专家在 80% 的层里是 MoE 子层的尾巴，16 行以下现在跑进路由 GEMM 内部，每步省 220 微秒。</li>
+<li><strong>提前启动与 Engram all-gather。</strong> all-reduce 终结器在自己的 grid 等待一结束就启动依赖方（省 16 微秒），索引器的 MQA logits 在 grid 同步前就加载 KV（省 24 微秒）。Engram 的 all-gather 从 NCCL 换成融合入口核加 Lamport all-gather，跑在层自己的流上，每步省约 40 微秒。</li>
+</ul>
+<h2>6. 机柜级共享内存池：Mooncake 与 Engram</h2>
+<p>Rubin 算得快，机柜能扛的并发远高于 GB300，所有 agentic 会话的存活前缀也超出任何单 rank 缓存。GB300 上前缀存在每 rank 的 CPU 层、会话钉在固定 rank 上；Rubin 的并发下这层太小，钉死又让有的 rank 空转、有的排队。解法是把内存池化到整个机柜：KV 放在 DRAM 与空闲 HBM 里、走 RDMA 加载，Engram 表放在 HBM 里、走 NVL72 的 NVLink 读取。即使在很高并发下，前缀命中率仍保持 96.5% 到 97%，接近理论命中率。会话不再绑 rank，工作负载感知路由独自把各 rank 拉平。</p>
+<p><strong>Mooncake 池。</strong> 一个 Mooncake 存储横跨每个 prefill 与 decode 托盘的 DRAM，代替每 rank 的 CPU 层，任何 rank 都能经 RDMA 加载任何前缀，请求挪位置只花一次 KV 加载，不用重算。prefill 调度器等池子的方式也优化了：查找在进程外异步跑，本地 HBM 已命中的请求跳过查找但仍刷新租约，KV 加载在查找一返回就开始，不等到下一步。被待查找拖欠的 prefill 步从占步时 6% 到 14% 降到 0.5% 以下，等 KV 加载的步从 13.5% 降到 1%。</p>
+<p><strong>HBM 池。</strong> DeepSeek-V4.1-Flash 小、每 token 的 KV 缓存小，服务一个请求只用掉 prefill 与 decode GPU 的一小部分 HBM。Mooncake 握住前缀之后，剩下的 HBM 本来闲置。每个 prefill rank 现在只留够一个最长请求的 KV 缓存，把其余 KV 预算交给 Mooncake 当 HBM 段，自动定大小，把池子从 DRAM 扩展到每块 prefill GPU 的空闲 HBM，走同一条 RDMA 路径读。HBM 池仍是实验性的。</p>
+<p><strong>Engram 池。</strong> 两个角色现在都把 Engram 的两张 94.4 GiB 哈希 n-gram 表放进 HBM。decode 早已把表切分到 DP rank 上，但每个 DEP2 prefill 实例都在 host 内存里各存一份完整拷贝，每托盘约 378 GiB。走 NVL72 后，prefill 引擎组成一个 peer group 切分这张表，18 块 GPU 上每块 10.5 GiB，其余部分从 peer 的 HBM 经 NVLink 读。查找比从 host 内存更快，释放出来的 host 内存能多放约 1500 个会话的存活前缀。</p>
+<p><strong>工作负载感知路由。</strong> 前缀都在共享池里，会话不必留在固定 rank 上，会话亲和造成的 DP 不均衡随之消失。Dynamo 把每个请求放到未缓存工作量最小的（worker，DP rank）上，只改配置。三台 DEP2 实例在 4800 并发下，池子加路由多服务 68% 请求，TTFT P50 从 29.8 秒降到 4.2 秒，命中率从 91.8% 升到 96.1%。12 倍 DEP2 的模拟里，一边 rank 空转、一边 rank 排队的时长从 10.3% 降到 1.3%，TTFT P90 从 0.98 秒降到 0.38 秒。</p>
+<h2>7. 取舍：优化绑在 Rubin 的硬件事实上</h2>
+<p>这篇的优化全部绑在 Rubin 的硬件事实上——双内存域、SM107 的宽 MMA、72 卡共享 NVLink 域。换一台机器，tile 尺寸、权重切分、池子布局都要重算。这项工作由 Inferact 主导，DeepSeek 开源了 DeepSeek-V4.1-Flash 与核，NVIDIA 提供了 Vera Rubin NVL72 的早期访问与性能优化协作。</p>
+<p>对推理基建的启示有三条：<strong>第一，核优化的收益越来越多来自核周围</strong>——数据放哪个内存域、tile 按谁定、combine 等谁，比核本身的算子更重要；<strong>第二，低延迟路径是减法</strong>——TP8 路径的每一项都是把边界融掉、把缺口填上，220 微秒的共享专家、57 微秒的打包 FP4 级、40 微秒的 Engram all-gather，全是小核链上的整微秒账；<strong>第三，KV 缓存正在从单卡资源变成机柜资源</strong>——Mooncake 池与 Engram 切分把前缀命中率的决定权从单 rank 的显存容量交给了机柜的拓扑与路由策略，4800 并发下 96.5% 到 97% 的命中率是这个转变的直接结果。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
