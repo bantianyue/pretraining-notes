@@ -468,6 +468,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">多模态服务</span><span>收藏于 2026-11-12</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">37</span>vLLM 首日支持 Inkling 2 Small：Gluon 核与注意力残差的融合</h3>
+  <p>594B 总参数、17B 激活参数的多模态 MoE，48 层、384 个路由专家 top-8，上下文 1M token；块注意力残差、门控注意力、注意力 sink、23 层 ViT，专家前 40 层 NVFP4、后 8 层 MXFP8，DSpark 推测器每步起草 7 个 token；allreduce_conv_mix 把注意力残差边界上的五步内存操作融成一个核，序列并行让 8K token 的 prefill 步快 22% 到 26%，warp 特化的 Gluon 核把 6 个头打包进一个 64 行块、KV 只读一次，100K 上下文的 batch-1 解码步从 15.1 毫秒降到 4.8 毫秒；TP8 agentic 负载下 32K 到 256K 上下文每 GPU 约 1070 到 450 tokens/s，单用户 TP4 约 630 tokens/s、接受长度 3.5。</p>
+  <div class="links">
+    <a class="cn" href="pages/vllm-inkling2-small.html">中文精读 →</a>
+    <a class="en" href="https://vllm.ai/blog/2026-11-12-inkling2-small">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">Kernel 优化</span><span>收藏于 2026-11-13</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
