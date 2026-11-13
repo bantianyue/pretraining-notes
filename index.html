@@ -226,6 +226,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">GPU Kernel 优化</span><span class="tag">推理优化</span><span>收藏于 2026-11-12</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">35</span>TorchTitan 在 GH200 上训 1T MoE：FlexShard、激活 offload 与 FSDP 碎片</h3>
+  <p>EUROPA 联盟在公共超算 JUPITER 上训 951.9B 参数 MoE，384 张 GH200 每 DP 副本，吞吐 90 冲到约 1300 tokens/s/GPU；FlexShard 按整专家分片，Muon 的 Newton-Schulz 正交化在本 rank 内完成、零通信，NS 搬上 GPU 后优化器步 41.7 秒降到 2.2 秒；65,536 token 下 74 层边界激活约 55 GiB，沿 900 GB/s NVLink-C2C offload 到 Grace 内存；FSDP 的旁路流缓存困住 27.3 GiB，unshard_async_op 把 all-gather 配置放到计算流上跑，重试 rank 从 384 降到 0。约束是 InfiniBand 比片内链路慢 36 倍、计算节点 Host 内存只有 120 GB；全部修复已上游进 PyTorch 与 TorchTitan。</p>
+  <div class="links">
+    <a class="cn" href="pages/torchtitan-1t-moe-flexshard.html">中文精读 →</a>
+    <a class="en" href="https://pytorch.org/blog/training-a-1t-parameter-moe-on-eu-public-infrastructure-with-pytorch-and-torchtitan/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">训练框架</span><span>收藏于 2026-11-13</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
