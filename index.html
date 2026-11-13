@@ -236,6 +236,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">训练框架</span><span>收藏于 2026-11-13</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">36</span>vLLM 在 Vera Rubin NVL72 上跑 DeepSeek-V4.1-Flash：58 倍吞吐的三层改造</h3>
+  <p>一块 Vera Rubin NVL72 机柜上 vLLM 跑 DeepSeek-V4.1-Flash，AgentX 负载下每 GPU 1.7M tokens/s、每用户 387 tokens/s，相对 GB300 NVL72 快 58 倍，峰值 2.52M、单用户 1810 tokens/s；核按 Rubin 双内存域与 SM107 宽 FP4 MMA 重写，prefill 步快 28%、decode 步快 25%；专用 TP8 低延迟路径把每用户 P50 输出从 1117 升到 1844 tokens/s；Mooncake KV 池横跨机柜 DRAM 与空闲 HBM、Engram 表按 peer group 切分进 GPU HBM、Dynamo 按未缓存工作量路由，4800 并发下 TTFT P50 从 29.8 秒降到 4.2 秒、命中率 91.8% 升到 96.1%。</p>
+  <div class="links">
+    <a class="cn" href="pages/vllm-vera-rubin-deepseek-v41.html">中文精读 →</a>
+    <a class="en" href="https://vllm.ai/blog/2026-11-12-deepseek-v41-flash-vera-rubin">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-13</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
