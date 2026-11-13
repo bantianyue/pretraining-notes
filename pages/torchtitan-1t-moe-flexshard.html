@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TorchTitan 在 GH200 上训 1T MoE：FlexShard、激活 offload 与 FSDP 碎片 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>TorchTitan 在 GH200 上训 1T MoE：FlexShard、激活 offload 与 FSDP 碎片</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://pytorch.org/blog/training-a-1t-parameter-moe-on-eu-public-infrastructure-with-pytorch-and-torchtitan/">https://pytorch.org/blog/training-a-1t-parameter-moe-on-eu-public-infrastructure-with-pytorch-and-torchtitan/</a></div>
+<h1>TorchTitan 在 GH200 上训 1T MoE：FlexShard、激活 offload 与 FSDP 碎片 · 中文精读</h1>
+<blockquote>
+<p>原文：https://pytorch.org/blog/training-a-1t-parameter-moe-on-eu-public-infrastructure-with-pytorch-and-torchtitan/（PyTorch 官方博客，EUROPA 联盟）
+精读日期：2026-11-13 ｜ 主题：并行策略（训练）、训练框架、GPU 内存管理、优化器</p>
+</blockquote>
+<h2>0. 一句话：三处改造，90 到 1300</h2>
+<p>EUROPA 联盟（Domyn 与弗劳恩霍夫 IAIS、IIS）在欧洲公共超算 JUPITER 上训一个约 1 万亿参数的 MoE 模型：951.9B 总参数、每 token 激活 32.8B，74 层、384 个路由专家、top-8，序列长度 65,536 token。每个 DP 副本 384 张 NVIDIA GH200（96 个节点），吞吐从基线 90 tokens/s/GPU 冲到约 1300 tokens/s/GPU。</p>
+<p>三处关键改造各解一个硬约束：<strong>FlexShard 按整专家分片，让 Muon 的 Newton-Schulz 正交化免通信；激活检查点 offload 到 Grace CPU，换序列长度；FSDP 的 all-gather 配置放到计算流上跑（unshard_async_op），清掉 27.3 GiB 被困显存。</strong> 全部修复都已上游进 PyTorch 与 TorchTitan。</p>
+<h2>1. 机器：JUPITER 节点的带宽账</h2>
+<p>JUPITER Booster 每个节点 4 块 GH200 Grace Hopper 超级芯片：每块是一颗 Hopper GPU（96 GB HBM3）加一颗 72 核 Grace CPU（120 GB LPDDR5X），之间是 900 GB/s 的 NVLink-C2C。节点内 GPU 之间 NVLink 4，每方向 150 GB/s；每个节点 4 块 InfiniBand NDR200 网卡，折合每 GPU 约 25 GB/s。</p>
+<p>两处约束决定设计：</p>
+<ul>
+<li><strong>节点间带宽</strong>：InfiniBand 比 GPU 到自家 CPU 的链路慢 36 倍，而 1T 参数模型分布到几百块加速器上，训练全程都要跨这条边界。走 InfiniBand 的流量必须与计算重叠。</li>
+<li><strong>Host 内存容量</strong>：GH200 的 Grace 最多配 480 GB LPDDR5X，但 JUPITER 计算节点实际是 120 GB 配置（登录节点才是 480 GB），重带宽、轻容量。内核分走一部分后，每 GPU 可用约 108 GiB，实测有的节点开工时更少。</li>
+</ul>
+<p>并行布局由此定下：<strong>384 路 FSDP，节点内 4 路专家并行，不用流水线并行</strong>。MoE 的 token all-to-all 很难重叠，留在 NVLink 上跑。不用流水线并行，步子更短，大批量摊掉固定开销：每步 384 条序列、每条 65,536 token，约 2500 万 token。FSDP 本来就能把第 n+1 层的 gather 与第 n 层的计算重叠，剩下的工作是让重叠真正生效：序列拉长、算得更久；压少走 InfiniBand 的字节数；用 Grace 内存凑够装模型、梯度与优化器状态的总容量。</p>
+<h2>2. FlexShard：Muon 免通信</h2>
+<p>优化器分工是 Muon 管除 router 与 embedding 外的全部权重矩阵（约占参数的 99.5%），其余用 AdamW。Muon 每个参数只要一份 fp32 状态，Adam 要两份——少掉这一份状态，是 65,536 token 序列能塞进显存的关键。</p>
+<p>Muon 用几次 Newton-Schulz 迭代把更新正交化，迭代作用在整个矩阵上。FSDP 把每个矩阵切成 384 个分片，直白的实现是把矩阵 gather 到某一个 rank 上、跑完 Newton-Schulz 再 scatter 回去。在这套互连上，这份通信太贵了。</p>
+<p>FlexShard（已是 TorchTitan 的一部分）能控制哪个 rank 拥有哪部分参数。<strong>专家按整专家分片</strong>：每个 rank 拥有完整的专家矩阵，Newton-Schulz 迭代全在本 rank 内跑，零通信。注意力投影这类稠密矩阵仍由归属 rank 收集，各 rank 在稠密矩阵传输途中处理自己的专家，通信与计算重叠。</p>
+<p>配上 FSDP 的 CPU offload，优化器在 Grace 上跑，参数就存在那里，72 个 Arm 核上 Newton-Schulz 每步约 35 秒。团队给 TorchTitan 贡献了支持：参数继续 offload 在 Grace 上，Newton-Schulz 在 GPU 上跑。优化器步从 41.7 秒降到 2.2 秒，吞吐从 441 升到 597 tokens/s/GPU（+35%）。Profiler 对比：NS 在 Grace 上时，反向传播结束后 GPU 空转约 34 秒等 CPU；NS 在 Hopper 上时，优化器只占一小步，步长从 144.7 秒降到 110.9 秒，空闲从 34.3 秒降到 2.3 秒。</p>
+<h2>3. 激活检查点 offload 到 Grace</h2>
+<p>这个配置下，每层 gather 的权重体积不随 token 数变，序列拉长只增加计算时间，不增加通信。起初只在层边界存激活，层内全部在反向重算（TorchTitan 里叫 FullAC）。基线那一步 GPU 大部分时间空转，多算一点也不拉长步子，吞吐从 90 升到 370 tokens/s/GPU，序列长度 32,768 token。</p>
+<p>序列到 65,536 token 时，光边界激活就是 74 层 × 65,536 token × 6,144 × 2 字节，约 55 GiB 每 GPU，挨着权重放不进 HBM。GH200 到 120 GB CPU 内存有 900 GB/s 的链路，于是决定 offload：<strong>每个边界激活在前向产出后拷去 Grace，反向在重算前一层拷回 Hopper</strong>。一个 offload 参数控制多少层 offload，在 HBM 与 Grace 内存之间做 trade-off。</p>
+<p>TorchTitan 的激活检查点 wrapper 让这处改动很顺手，团队把 offload 的 hook 贡献给了 TorchTitan，再在上面搭自己的 offload 策略。开了 offload，吞吐从 370 升到 508 tokens/s/GPU（+37%），序列长度先到 49,152 token，再随 Muon 到 65,536 token。</p>
+<h2>4. FSDP 显存碎片：unshard_async_op</h2>
+<p>软件栈升级之后，CUDA 缓存分配器在显存占用约 70% 时开始在每个 rank 上重试分配。重试那一刻，HBM 还空着 25 到 30 GiB，分配器却用不上。</p>
+<p>根因在 FSDP 拿通信与计算重叠的方式上：<strong>FSDP 用一条计算流加四条旁路流，分配器按流各管一个池子，某条流释放的内存只能由这条流复用。</strong> FSDP 在写 buffer 的流上分配，几处通信优化的临时 buffer 也落在 FSDP 调用里的旁路流上。重放峰值显存时刻的分配器事件日志，旁路流攥着 27.3 GiB，其中只有 6.4 GiB 在用，剩下 20.9 GiB 计算流够不着，于是找不到一块 4 GiB 给 MoE buffer。</p>
+<p>FSDP2 有个私有 flag 叫 unshard_async_op：把 all-gather 配置放到计算流上跑，NCCL 走自己的内部流。gather buffer 从计算流的池子里分配、用完还回计算流的池子。团队把自己的 gather 改成异步，计算流只在真正需要权重时才等网络。结果：出现分配器重试的 rank 从 384 个降到 0，峰值预留显存从 88.1 降到 74.6 GiB，吞吐从 996 升到 1210 tokens/s/GPU。团队向 TorchTitan 提了打开这个 flag 的选项，评审之后，unshard_async_op 正在进入公开的 FSDP API，其他 FSDP 用户也能直接用。</p>
+<h2>5. 十五项改动的累积账</h2>
+<table>
+<thead>
+<tr>
+<th>改动</th>
+<th>吞吐（tokens/s/GPU）</th>
+<th>变化</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>基线 FSDP</td>
+<td>90</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Full recompute</td>
+<td>370</td>
+<td>+311%</td>
+</tr>
+<tr>
+<td>激活 offload</td>
+<td>508</td>
+<td>+37%</td>
+</tr>
+<tr>
+<td>Muon（NS on Grace）</td>
+<td>441</td>
+<td>-13%</td>
+</tr>
+<tr>
+<td>NS on Hopper</td>
+<td>597</td>
+<td>+35%</td>
+</tr>
+<tr>
+<td>异步稠密 all-to-all</td>
+<td>603</td>
+<td>+1%</td>
+</tr>
+<tr>
+<td>动态 GEMM 调度器</td>
+<td>632</td>
+<td>+5%</td>
+</tr>
+<tr>
+<td>数据均衡</td>
+<td>715</td>
+<td>+13%</td>
+</tr>
+<tr>
+<td>专家均衡</td>
+<td>763</td>
+<td>+7%</td>
+</tr>
+<tr>
+<td>FP8 权重 gather</td>
+<td>898</td>
+<td>+18%</td>
+</tr>
+<tr>
+<td>BF16 上线传输</td>
+<td>1022</td>
+<td>+14%</td>
+</tr>
+<tr>
+<td>节点内稠密 reshard</td>
+<td>1038</td>
+<td>+2%</td>
+</tr>
+<tr>
+<td>All-gather for the mill</td>
+<td>996</td>
+<td>-4%</td>
+</tr>
+<tr>
+<td>显存上计算流</td>
+<td>1210</td>
+<td>+21%</td>
+</tr>
+<tr>
+<td>NCCL 封顶 16 CTAs</td>
+<td>1293</td>
+<td>+7%</td>
+</tr>
+</tbody>
+</table>
+<p>注意两处回落也有信息量：Muon 刚上 Grace 时吞吐反而跌 13%（NS 在 CPU 上太慢），直到搬上 Hopper 才翻回来；All-gather for the mill 那步也跌 4%，是为后续步骤付的代价。</p>
+<h2>6. 其他上游贡献与边界</h2>
+<p>除了上面三项，团队还贡献了：共享 RoPE 缓存（这个序列长度下每 GPU 省 2.56 GiB）、反向跳过 embedding 的重 gather、可配置的 seed-offset mesh 轴；PyTorch 侧修复了 CPU 初始化重置 RNG 状态、trunc_normal_ 对 DTensor 做 all-gather；还向于利希超算中心报告了开工时未归属的 host 内存——这台机器的每个用户都会受影响。</p>
+<p>现在训练以约 1300 tokens/s/GPU 的持续吞吐跑在 384 张 GH200 上，每个 DDP 副本如此，4 个 DDP 副本一共 1536 张 GPU。剩下的路在姊妹篇里：数据与专家负载均衡、压少走 InfiniBand 的字节数、节点内 reshard、SonicMoE 里的动态 tile 调度、给 NCCL 的 SM 占用封顶。</p>
+<p>三条可复用的判断：<strong>优化器的通信要靠参数归属消掉，而不是靠更快地传；显存不够时，把边界激活沿着最快的片内链路外溢，而不是缩序列；分配器的碎片是流归属问题，buffer 从哪个流的池子来，就决定了谁能复用。</strong></p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
