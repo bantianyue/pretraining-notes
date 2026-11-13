@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang 接进 IBM Spyre：一周、两人、1500 行插件 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang 接进 IBM Spyre：一周、两人、1500 行插件</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://pytorch.org/blog/integrating-sglang-into-spyre-in-under-a-week-with-ai/">https://pytorch.org/blog/integrating-sglang-into-spyre-in-under-a-week-with-ai/</a></div>
+<h1>SGLang 接进 IBM Spyre：一周、两人、1500 行插件</h1>
+<ul>
+<li>原文：Integrating SGLang into Spyre in Under a Week with AI（PyTorch 官方博客，2026-11-12）</li>
+<li>原文链接：https://pytorch.org/blog/integrating-sglang-into-spyre-in-under-a-week-with-ai/</li>
+<li>作者：IBM Spyre 加速器团队</li>
+<li>星级：4⭐（推理服务化、非 NVIDIA 硬件后端；机制是集成模式而非核优化，篇幅短）</li>
+<li>一句话要点：两人加 AI 编程智能体，不到一周把 SGLang 接进 IBM Spyre，插件约 1500 行；靠 PyTorch 已有的 Spyre 硬件支持与 SGLang 清晰的扩展点，吞吐是参考实现的 3.6 倍，与 vLLM 持平，RadixCache 前缀共享零改动接入。</li>
+</ul>
+<h2>背景：Spyre 与起点</h2>
+<p>Spyre 是 IBM 面向企业 AI 推理的加速器，经 torch-spyre 接入：torch-spyre 把 Spyre 注册成 PyTorch 设备，连上 torch.compile，经标准 PyTorch API 暴露硬件支持。</p>
+<p>IBM 的 Spyre 团队想把 SGLang 的服务栈，包括内置的前缀共享，带给 Spyre 用户。两个人，借助 AI 编程智能体，不到一周就把 SGLang 接进 IBM Spyre，插件只有约 1500 行。关键在起点：PyTorch 里已有 Spyre 硬件支持，SGLang 的扩展点又分得清楚，复用硬件代码就行。</p>
+<p>AI 编程智能体拿 PyTorch 里已有的 Spyre 算子实现当参考代码，按 SGLang 的后端接口改写集成代码；工作集中在把已有的硬件支持连到新的服务框架上。插件已随上游 SGLang 一起开源。</p>
+<h2>结果：3.6 倍，与 vLLM 持平</h2>
+<p>最初的 SGLang 集成花了两人不到一周。插件约 1500 行，建在 PyTorch 的编译器与可复用硬件支持之上。四个小补丁扩展了 SGLang 的后端支持：</p>
+<ul>
+<li>两个补丁让已有执行路径摆脱对 CUDA 的依赖。</li>
+<li>两个补丁把 Spyre 注册成支持的设备与不依赖 Triton 的注意力后端。</li>
+</ul>
+<p>兼容性改动也能支持别的加速器，注册改动是 Spyre 专属的。</p>
+<p>SGLang 在 Spyre 上达到参考 PyTorch 推理实现（用 torch-spyre）约 <strong>3.6 倍</strong>的吞吐。团队还在 Spyre 上对比了 SGLang 与 vLLM，用的模型是 Granite 3.3 8B 与 Gemma 4 26B A4B：在测过的负载上，SGLang 的性能与 vLLM 持平。图中数值归一化到 vLLM=1.0，越低越好：Granite 3.3 8B 上 SGLang 0.993（快 0.7%），Gemma 4 26B-A4B 上 1.008（vLLM 快 0.8%），TP/DP 4/1、batch 4。</p>
+<h2>为什么能这么快：扩展点分得清</h2>
+<p>编译器能用、推理服务器现成，加 SGLang 就成了一个聚焦的集成任务。PyTorch 与 torch.compile 提供了一个共享实现层：经 API 表达加速器功能，两个服务框架都能用。</p>
+<p>SGLang 提供了清晰的连接点：平台注册、注意力后端、KV 池与算子分发，把集成拆成有界的任务，同时保住已有的调度器、请求处理与服务循环。参考代码来自已有的 vLLM Spyre 集成，包括它对加速器算子的 PyTorch 实现：这给 AI 编程智能体提供了 Spyre 硬件行为的具体代码，SGLang 的扩展点则定义了改写后的代码必须满足的接口。两者合起来，减少了智能体要推断的硬件细节与集成归属。</p>
+<p>已有的 vLLM Spyre 后端约 3500 行，SGLang 插件约 1500 行。最初集成里，注意力基类提供了外围逻辑，Spyre 后端只需重写内层的缩放点积注意力算子；复用这个基类，解释了两个插件之间约三分之二的行数差。SGLang 与设备无关的 KV 池也只需要一次方法重写做缓冲创建；分配仍需走 PyTorch 处理，因为已有路径依赖 Triton。</p>
+<h2>复用 vLLM 实现：RadixCache 零改动</h2>
+<p>团队复用了 vLLM Spyre 集成的注意力代码，包括它怎么把输入分组进桶、怎么处理张量形状；也复用了它基于 PyTorch 的 KV 缓存分配方式。RMSNorm、SiLU、GeLU、旋转嵌入与线性层，则把已有的 Spyre 实现连到 SGLang 的算子分发上。</p>
+<p>有些功能完全不需要 Spyre 专属工作。RadixCache 是个好例子：前缀共享完全在 SGLang 的调度器内部解决，执行到达加速器之前就已完成，已有的调度逻辑原样可用。</p>
+<h2>怎么用与展望</h2>
+<p>下面的例子假设 Spyre 运行时、torch-spyre、SGLang 插件与其兼容性补丁已安装并配置好：</p>
+<pre><code class="language-python">import sglang as sgl
+
+models = [
+    &quot;ibm-ai-platform/micro-g3.3-8b-instruct-1b&quot;,
+    &quot;mistralai/Ministral-8B-Instruct-2410&quot;,
+]
+
+for model in models:
+    engine = sgl.Engine(
+        model_path=model,
+        device=&quot;spyre&quot;,
+        attention_backend=&quot;spyre_paged&quot;,
+        dtype=&quot;float16&quot;,
+        page_size=64,
+        max_running_requests=1,
+        disable_cuda_graph=True,
+    )
+
+    try:
+        output = engine.generate(
+            &quot;Why is the sky blue?&quot;,
+            {&quot;temperature&quot;: 0, &quot;max_new_tokens&quot;: 64},
+        )
+
+        print(model, output[&quot;text&quot;])
+
+    finally:
+        engine.shutdown()
+</code></pre>
+<p>展望三件事：未来几个月增加动态形状支持，减少今天要做的形状管理；今年晚些时候把 Triton 带到 Spyre，并在上面启用 RadixAttention，打开更多核优化的门；硬件支持留在 PyTorch 里，集成代码留在 SGLang 的扩展点上，未来的编译器与运行时改进就有一条进服务栈的路。</p>
+<h2>关键数字</h2>
+<ul>
+<li>集成成本：<strong>不到一周、两个人、约 1500 行</strong>插件（vLLM Spyre 后端约 3500 行）。</li>
+<li>吞吐：相对参考的 torch-spyre 推理实现约 <strong>3.6 倍</strong>。</li>
+<li>与 vLLM 对比（归一化到 vLLM=1.0，越低越好）：Granite 3.3 8B 上 <strong>0.993</strong>（SGLang 快 0.7%），Gemma 4 26B-A4B 上 <strong>1.008</strong>（vLLM 快 0.8%），TP/DP 4/1、batch 4。</li>
+<li>行数差：注意力基类复用解释约 <strong>三分之二</strong>。</li>
+<li>补丁：4 个小补丁（2 个去 CUDA 依赖，2 个注册 Spyre 设备与注意力后端）。</li>
+</ul>
+<h2>与 SGLang-Neuron 的对照</h2>
+<p>同一天发布的两篇 SGLang 非 NVIDIA 后端文章，讲的是同一套思路的两面：SGLang-Neuron 是在 Trainium 上从零建后端（异步运行时、Megakernel、PD 分离、HiCache），Spyre 是把 SGLang 接进已有硬件支持（一周、1500 行）。共同点是分层：硬件支持留在 PyTorch 里（torch-spyre、TorchNeuron），服务框架只在扩展点上接线；不同点是工作量级：Neuron 是深耕一个后端，Spyre 是证明接线本身可以很轻。两篇合起来看，SGLang 的扩展点（平台注册、注意力后端、KV 池、算子分发）就是新加速器接入的通用接口。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
