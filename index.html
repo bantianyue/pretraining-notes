@@ -558,6 +558,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">MoE 架构</span><span class="tag">训练核心流程</span><span>收藏于 2026-11-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">46</span>《端到端 4-bit 训练》NVFP4 前向、MXFP8 反向与随机舍入</h3>
+  <p>Inkling 2 Small 的配方：前向专家层用 NVFP4、反向用 MXFP8 加随机舍入、通信用随机 Hadamard 变换加 S2F6，预训练快 8%、RL 快 20%，代价约 2% 计算效率。NVFP4 在 GB300 上 15 PFLOPS、每值 4.5 比特，比 BF16 少存 3.6 倍比特、快 6 倍；随机舍入让重用量化后的张量在期望上等于前向值，解决块缩放转置的偏置问题；RHT 把离群值抹平，让 S2F6 量化不损精度；BBBK 内核同时饱和 NVLink、ALU 与 Tensor Core；Inkling 2 Small 预训练只用 68 小时。</p>
+  <div class="links">
+    <a class="cn" href="pages/end-to-end-4-bit-training.html">中文精读 →</a>
+    <a class="en" href="https://thinkingmachines.ai/blog/end-to-end-4-bit-training/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Blackwell</span><span class="tag">训练核心流程</span><span>收藏于 2026-11-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
