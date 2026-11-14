@@ -568,6 +568,46 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Blackwell</span><span class="tag">训练核心流程</span><span>收藏于 2026-11-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">47</span>《HyScale》FlashTopK 免分数表选 top-k，GLM-5.1 百万 token 训练快 2.07 倍</h3>
+  <p>选分的输出不是连续激活，而是一组离散下标：FlashTopK 边打分边选 top-k，分数表永不落盘；选择重放让重算只重打 k 个分。512 张 H20 上，GLM-5.1 百万 token 训练快 2.07 倍，分数表 32 GiB 变成下标索引 64 MiB；块级 CSA 与 QSA 层分别快 2.01 倍与 1.57 倍；弱扩展 128K 到 8M 上下文，总耗时只涨 11 倍、基线涨 190 倍。</p>
+  <div class="links">
+    <a class="cn" href="pages/hyscale-flashtopk.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/abs/2610.32057">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">长上下文训练</span><span class="tag">稀疏注意力</span><span class="tag">Kernel 优化</span><span>收藏于 2026-11-14</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">48</span>《PearlQuant》E8 格量化 KV 缓存，128 并发下首 token 从 144 秒降到 7 秒</h3>
+  <p>E8 格量化把 KV 缓存压到每值 3.2 比特：8 个值一组、240 个面，比 FP8 的立方体多装信息；10 万 token 会话从 5.1 GB 降到 1.8 GB。128 并发下首 token 从 144 秒降到 7 秒，峰值吞吐高 24%；3.2 比特精度几乎无损，2.1 比特在长上下文上掉；解码在片上完成，不用走 HBM round-trip。</p>
+  <div class="links">
+    <a class="cn" href="pages/pearlquant-e8-kv-cache.html">中文精读 →</a>
+    <a class="en" href="https://pearlresearch.ai/research/blog/pearlquant">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">低精度量化</span><span class="tag">推理服务</span><span>收藏于 2026-11-14</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">49</span>《SGLang 统一内存》三类状态共用一个 arena，千并发下首 token 从 43 秒降到 6 秒</h3>
+  <p>三类状态共用一个 arena，容量跟随需求走：一 token 的全部层 KV 行打包成一条 entry，同进同出；逻辑释放立即生效，物理复用等在途工作做完。GPT-OSS-20B 千并发下同时跑约 1,000 个请求对 618 个，吞吐高 14%，首 token 从 43 秒降到 6 秒；配错比例要丢 12–14% 吞吐。</p>
+  <div class="links">
+    <a class="cn" href="pages/sglang-unified-memory.html">中文精读 →</a>
+    <a class="en" href="https://www.lmsys.org/blog/2026-11-11-unified-memory/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理服务</span><span class="tag">KV 缓存</span><span class="tag">混合模型</span><span>收藏于 2026-11-14</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">50</span>《Helion 编译期启发式》读 kernel IR 给配置，不调参跑赢手写 Triton 1.18 倍</h3>
+  <p>编译期读 kernel 的 IR、做存活分析，直接算出 block 大小、warp 数、stage 数：线性注意力前向跑赢手写 FLA Triton 1.18 倍，vLLM 规约核跑赢手写 CUDA 1.27 倍，全量自调优只再多约 3%。把算出的配置当 autotune 种子，到 50% 以内只要 1 个配置、不用 35.5 个；最终配置不变，只是搜得更快。</p>
+  <div class="links">
+    <a class="cn" href="pages/helion-compile-time-heuristics.html">中文精读 →</a>
+    <a class="en" href="https://pytorch.org/blog/fast-by-default-compile-time-heuristics-for-helion-kernels/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">编译器</span><span class="tag">推理服务</span><span>收藏于 2026-11-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
