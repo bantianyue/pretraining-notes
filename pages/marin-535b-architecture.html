@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marin 535B-A23B 架构抉择：潜 MoE、专家并行与 18T token 训练 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Marin 535B-A23B 架构抉择：潜 MoE、专家并行与 18T token 训练</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://openathena.ai/blog/marin-535b-architecture/">https://openathena.ai/blog/marin-535b-architecture/</a></div>
+<h1>Marin 535B-A23B 架构抉择：潜 MoE、专家并行与 18T token 训练（中文精读）</h1>
+<ul>
+<li>原文：Architecture Decisions for Marin 535B-A23B，Larry Dial，Open Athena，2026-11</li>
+<li>原文链接：https://openathena.ai/blog/marin-535b-architecture/</li>
+<li>收藏日期：2026-11-14</li>
+<li>星级：4⭐</li>
+<li>主题：MoE 架构 / 训练核心流程</li>
+</ul>
+<h2>一句话要点</h2>
+<p>535B-A23B 在 768 块 GB200 上训 18T token：潜 MoE 省一半通信、专家并行丢 token 换 1.3 倍算效、缩放梯 300 倍外推预测 2.039，实际 1.982。</p>
+<h2>架构总览</h2>
+<ul>
+<li>535B 总参数、23B 激活；48 层、隐宽 6144（宽深比 128）；8/384 Latent MoE（2 倍压缩）+ 2 共享专家</li>
+<li>3:1 局部滑窗（2048）/全局注意力；GQA 局部 4:1、全局 8:1；门控注意力</li>
+<li>权重初始化 0.5/√隐宽；Sigmoid 路由，top-k 权重重归一化，和为 2.5</li>
+<li>局部 50% 部分 RoPE，全局 NoPE；logit z loss（1e-4）；头维 128</li>
+<li>基础优化器 Muon；Hyperball：矩阵用 MuonH，lm_head 用 AdamH，其余用普通 Adam</li>
+<li>Adam 学习率拟合：adam_lr = 0.087571 · tokens⁻⁰·³⁴⁶¹ · hidden⁻⁰·³⁴⁴⁸ · √(tokens_per_batch)，Adam 与 MuonH 保持 3/13</li>
+</ul>
+<h2>三个目标</h2>
+<ol>
+<li>768 块 GB200、12 月截止下做最好的模型；<strong>实现 MFU</strong> 是主导驱动力</li>
+<li>大规模 MoE 训练稳定可预测：预注册预测、wandb 直播全程</li>
+<li>与文献相似的归纳偏置，方便后续 SFT 与 RL</li>
+</ol>
+<p>效用函数：接近前沿的模型，质量下降时价值缓慢下降、训练失败时陡降；做终端用户首选的模型，除非达到当前最优，否则价值很小。</p>
+<h2>未知风险（启动前一个月手动找）</h2>
+<ul>
+<li>lm_head 参数范数崩塌：GPU 上每 1 万步、每 10 次运行约 1 次，分片计算数值错误；第 24,682 步从 150.7 跌到 21.4，损失 2.07 跳到 9.14；修法是弃用 jnp.linalg.norm，改显式范数 + 显式分片调用</li>
+<li>嵌入放 AdamH 时梯度范数尖峰：1.0 倍学习率最大尖峰约中位数 6 倍，1.2 倍约 60 倍，1.4 倍约 700 倍；放普通 Adam 则平滑无尖峰</li>
+<li>不用 logit z loss 时损失在过训区间爆炸：不用 z loss 的损失 4,000 步后上扬、11,000 步达 3.39；增益范数长到 557，有 z loss 时停在 183</li>
+</ul>
+<h2>模型定尺寸</h2>
+<p>六因素：截止时间（25 天准备 + 80 天训练 + 15 天缓冲）、算效最优（每激活参数约 60 token；超训 10 倍约 2 倍算效代价）、MFU（单机架 72 卡、至少 64 可用）、数据（23T 去重 token）、RL（2–3 周）、服务效率（降优先级）。
+落点：单机架塞下最大的模型、激活参数够训约 80 天。360B-A23B（20T token、82 天）最有希望；Rafal Wojdyla 的定容专家并行实现让 535B-A23B（20T token、85 天）能塞下，代价是定长缓冲带来的 token 丢弃。</p>
+<h2>专家并行丢 token 降风险</h2>
+<ul>
+<li>转 EP + 多 50% 路由权重 + 归一化潜 MoE，合起来约 1.3 倍算效（按 4e19–8e21 FLOPs 缩放梯）</li>
+<li>丢弃率随规模缓慢上升：d768 5.5% → d2048 7.1%；1 机架扩到 4 机架不改变趋势</li>
+<li>评估关丢弃后 EP 反超 FSDP（窄评估会让一两个专家过载；推理可无丢弃跑）</li>
+<li>4k 扩 65k 上下文：丢弃从 7% 跳到 37%，评估损失与换无丢弃 FSDP 只差 0.008 以内</li>
+<li>降风险措施：4k 启动、每批 4600 万 token；1/3 MLP 神经元放共享专家；保留 XSA</li>
+<li>主运行：切换到 ragged all-to-all 前约丢 3.4%，切换后接近零（4k 0.01%、16k 0.14%、65k 0.03%）</li>
+</ul>
+<h2>缩放梯</h2>
+<ul>
+<li>4 档，5e19 → 9e21 FLOPs，预测 2.7e24 FLOPs 的主运行（300 倍外推）；最大档照搬主运行批量</li>
+<li>三条律的主运行预测：主运行缩放梯 2.04、五月配方 2.05、67B-A2B 2.07</li>
+<li>缩放梯只跑 2 天（主运行少 2 天算力）；最高风险是主运行最初 5 天，尽早启动主运行本身信号更多</li>
+</ul>
+<h2>组件决策（算效 = 基线达到变体损失所需的算力倍数，按 L(C) = 1.6 + A·C⁻⁰·⁰⁹⁴¹）</h2>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>关键结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>归一化潜 MoE</td>
+<td>初期算效仅 0.74–0.75；可学习标量爬到约 4（抵消 0.5×0.5 初始化）；可学习 RMSNorm 带来 1.25× 算效，潜 MoE 值得保留（通信减半）</td>
+</tr>
+<tr>
+<td>GatedNorm</td>
+<td>先前运行已验证稳定性；Qwen3.8-Next 也报告显著提升稳定性；优化器差异 &lt; 0.011，无一致趋势</td>
+</tr>
+<tr>
+<td>XSA</td>
+<td>主配方上算效变化可忽略（3.0208 → 3.0221），但加速排程下早期路由平衡好得多，丢弃率减半；运行时代价近零</td>
+</tr>
+<tr>
+<td>QK RMSNorm 固定 1.3</td>
+<td>优于可学习逐头标量；d2048 上固定 1.3 以 2.6477 收尾、可学习 2.6484；上下文扩展时 1.3 → 1.66，65K–262K 用 (1 + 0.1·ln(n/65,536))²</td>
+</tr>
+<tr>
+<td>局部滑窗 2048</td>
+<td>vLLM 测得只比 512 慢 2–4%；d768 上 1.10× 算效</td>
+</tr>
+<tr>
+<td>GQA 4:1/8:1</td>
+<td>去 GQA 约 1.2× 算效，但 KV 缓存重要；局部 4:1（KV 受窗口封顶）、全局 8:1（KV 随长度增长）</td>
+</tr>
+<tr>
+<td>SConv（核 4）</td>
+<td>放 key、注意力输出、MLP 输出；四处都放 1.19×；完全去掉 +0.028；K 卷积支持 1 层归纳头，PKO 初始化增益会洗掉</td>
+</tr>
+<tr>
+<td>Top-k 分位数平衡</td>
+<td>偏置加在原始 logits 上（不用 sigmoid 之后）；直方图分箱与 GPU 数无关；logits 上平衡到约 2%，sigmoid 之后 3.4–4.9%</td>
+</tr>
+<tr>
+<td>专家粒度</td>
+<td>4/192 → 8/384 有 1.13–1.16×；16/768 增益递减，不值得付吞吐代价；8/384 让路由专家矩阵是方的，Muon 正交化均衡更新</td>
+</tr>
+<tr>
+<td>嵌入 RMSNorm</td>
+<td>嵌入范数从 177 长到约 7,800；查表后加 RMSNorm 保持单位尺度；去掉付出约 19% 算效</td>
+</tr>
+<tr>
+<td>lm_head Hyperball</td>
+<td>AdamH 以 1.08× 胜过谨慎 AdamW；固定范数不能固定 logit 尺度，z loss 仍必要</td>
+</tr>
+<tr>
+<td>线性 LR 衰减</td>
+<td>1% 热身、线性衰减到峰值 5%；胜过 WSD（Hyperball 固定范数，衰减须由排程提供）；1−√ 衰减略胜但只在 1.4 倍峰值 LR 下</td>
+</tr>
+<tr>
+<td>浅层架构</td>
+<td>6144 宽、48 层（宽深比 128）；MFU 优先；未加注意力残差、mHC、跳跃连接</td>
+</tr>
+<tr>
+<td>无前置稠密层</td>
+<td>转分位数平衡时去掉；异构层没能在时间内跑通</td>
+</tr>
+</tbody>
+</table>
+<h2>初步结果</h2>
+<ul>
+<li>主运行跟踪每 5% 的缩放梯预测到约 65%，扩到 16K、65K 上下文、配比改进后反超，最终 1.982，好于 2.039 的预测</li>
+<li>27.7B 档在 81% 处硬件故障崩溃，未恢复</li>
+<li>运行 93% 处 Paloma 宏损失改进的 0.02 归因于 Penn Treebank 子集被训练数据污染（占评估 1/16）</li>
+</ul>
+<h2>开放问题</h2>
+<p>分位数平衡在数据配比更新期间的重平衡节奏；局部窗口早期 128 迫使全局层专攻长上下文检索；可学习逐头 QK 乘子；更高最终学习率；lm_head 的 1/隐宽输出缩放；KDA、注意力残差、MLA、相对位置嵌入按 MFU 取舍；FP8 与 NVFP4（已在 20%、后 30% MFU，推迟）；过编码哈希嵌入；高深度压力测试；门控范数优化器组；后训练反馈；多 token 预测；初始层死路由专家；决策本身的方法论。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
