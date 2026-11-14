@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>端到端 4-bit 训练：NVFP4 前向、MXFP8 反向与随机舍入 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>端到端 4-bit 训练：NVFP4 前向、MXFP8 反向与随机舍入</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://thinkingmachines.ai/blog/end-to-end-4-bit-training/">https://thinkingmachines.ai/blog/end-to-end-4-bit-training/</a></div>
+<h1>端到端 4-bit 训练：NVFP4 前向、MXFP8 反向与随机舍入（中文精读）</h1>
+<ul>
+<li>原文：End-to-End 4-Bit Training，Jack Cook，Thinking Machines Lab，2026-11</li>
+<li>原文链接：https://thinkingmachines.ai/blog/end-to-end-4-bit-training/</li>
+<li>收藏日期：2026-11-14</li>
+<li>星级：4⭐</li>
+<li>主题：训练核心流程 / Blackwell（低精度量化）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Inkling 2 Small 的配方：前向专家层用 NVFP4、反向用 MXFP8 加随机舍入、通信用 RHT 加 S2F6，预训练快 8%、RL 快 20%，代价约 2% 计算效率。</p>
+<h2>配方总览</h2>
+<ul>
+<li>前向：专家层用 NVFP4，配专用内核</li>
+<li>反向：随机重用量化到 MXFP8，梯度用 MXFP8 矩阵乘法算</li>
+<li>通信：派发用 NVFP4，合并用随机 Hadamard 变换（RHT）加块缩放 S2F6</li>
+<li>数值配置从预训练开始到最后一次 RL rollout 全程一致，不用再校准</li>
+</ul>
+<h2>关键数字</h2>
+<ul>
+<li>NVFP4 在 GB300 上 15 PFLOPS、每值 4.5 比特；MXFP8 5 PFLOPS、每值 8.25 比特；BF16 2.5 PFLOPS、每值 16 比特</li>
+<li>NVFP4 比 BF16 少存 3.6 倍比特、快 6 倍</li>
+<li>预训练快 8%、RL 快 20%，代价约 2% 计算效率</li>
+<li>Inkling 2 Small 预训练只用 68 小时（GB300 NVL72 机架）</li>
+</ul>
+<h2>NVFP4 与块缩放</h2>
+<ul>
+<li>FP4 是 ±{0, 0.5, 1, 1.5, 2, 3, 4, 6}；大于 6 的数靠块缩放：NVFP4 按每 16 个连续值里绝对值最大的那个定比例因子</li>
+<li>MX 格式按 32 个值一块缩放；NVFP4 比例因子是 E4M3（更精确、范围有限），MX 比例因子是 E8M0（精度低、范围宽）</li>
+<li>演示：输入 593.7 时，96 × 6 = 576，量化误差 −17.7</li>
+<li>NVFP4 可表示量级 2⁻¹⁰ 到 2688；再配 FP32 外层比例因子，范围整体上移或下移（外层取 2 → [2⁻⁹, 5376]）</li>
+</ul>
+<h2>各阶段的风险与回报</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>降误差</th>
+<th>降偏置</th>
+<th>提速度</th>
+<th>省显存</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>预训练前向</td>
+<td>✓✓✓</td>
+<td>—</td>
+<td>✓✓</td>
+<td>—</td>
+</tr>
+<tr>
+<td>预训练反向</td>
+<td>✓</td>
+<td>✓✓✓</td>
+<td>✓✓</td>
+<td>—</td>
+</tr>
+<tr>
+<td>RL 采样器</td>
+<td>✓✓✓</td>
+<td>—</td>
+<td>✓✓✓</td>
+<td>✓✓✓</td>
+</tr>
+<tr>
+<td>RL 训练器</td>
+<td>✓</td>
+<td>✓✓✓</td>
+<td>✓</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>速度在高吞吐步骤里最重要：预训练跑万亿 token，RL 采样每轮生成数万 token</li>
+<li>反向在批量里对很多 token 求平均，随机舍入误差被稀释；但反向对量化偏置很敏感，偏置会在层、样本与训练步之间复合</li>
+</ul>
+<h2>块缩放的反向问题</h2>
+<ul>
+<li>前向 y = xq·wqᵀ；反向要转置：dx = g·wq，dw = gᵀ·xq</li>
+<li>转置后每个值跟 15 个不同的邻居分到一组，比例因子不同、量化值也不同，多数值会被舍入到零</li>
+<li>NVIDIA 的解法：按每 16×16 方块里最大的值算一个比例因子，转置时保持相同；缺点是容易下溢，256 个值里一个大值就能把比例因子顶上去</li>
+<li>16×16 块太粗糙，对 CE 的伤害超出可接受范围；最终用 1×16 比例因子量化权重，同时避开转置不一致</li>
+</ul>
+<h2>随机舍入重用量化</h2>
+<ul>
+<li>按位相同不是硬性要求；真正的要求是前向与反向用的张量在期望上相等：E[wq] = E[(wqᵀ)ᵀ]</li>
+<li>解法：把前向的张量反量化，在更高精度下转置，再用随机舍入（SR）重用量化；随机舍入按与两个邻居的距离成反比的概率向上或向下舍入</li>
+<li>例子：值 5.4、块比例因子 9 → 0.6 → FP4 0.5，前向量化值 4.5；反向新块比例因子 2，4.5 ÷ 2 = 2.25：确定性舍入得 4，随机舍入 3/4 概率得 2、1/4 概率得 3，期望 2 × (0.75 × 2 + 0.25 × 3) = 4.5</li>
+<li>随机舍入在 Blackwell GPU 上硬件加速；直接对反量化值做随机舍入的好处是重用量化时精度可以任选</li>
+<li>借鉴 Quartet II（随机旋转加偏置修正项）；最终把权重与激活随机重用量化到 MXFP8，再用 MXFP8 矩阵乘法算梯度</li>
+</ul>
+<h2>量化通信</h2>
+<ul>
+<li>GB300 NVL72：NVLink 单向 900 GB/s，NVFP4 GEMM 15 PFLOPS → 每收到 1 字节可做 16,000 次浮点运算；字节带不来足够计算，Tensor Core 就空等 NVLink</li>
+<li>派发：用 NVFP4 派发 token；反向用前向量化的激活算（WGRAD 输入），缓解派发瓶颈</li>
+<li>合并：输出激活要保持更高精度（默认 BF16）；先做 32 维随机 Hadamard 变换（RHT）、再量化到块缩放 S2F6，训练中测不到精度下降</li>
+<li>S2F6 是定点格式，2 个有符号整数位、6 个小数位，可表示 −128/64 到 127/64；RHT 把输入抹平，离群值不再顶高比例因子</li>
+<li>Blackwell 有专门的 PTX 指令转 S2F6；在 w2 分组 GEMM 尾声里算 RHT 并量化到 S2F6（每 32 个值一个比例因子），接收时在线反量化聚合、再逆变换 RHT；合并数据量从每值 16 比特降到 8.25 比特</li>
+</ul>
+<h2>内核：BBBK</h2>
+<ul>
+<li>MoE 融合内核栈代号 BBBK（Big Beautiful Blackwell Kernel），峰值硬件利用率、完全确定性计算</li>
+<li>GB300 独有的最大 2SM UMMA 指令（K=96），6 级乘数流水线与 7 级比例因子流水线，让 Tensor Core 饱和</li>
+<li>ALU 重的步骤（算比例因子、重用量化权重、随机舍入、合并数据传输）会让内核停顿；BBBK 让尽可能多的硬件流水线同时饱和：RHT 与 S2F6 量化融进 w2 GEMM 尾声，配 ALU 向量化、指令调度、寄存器规划与打包、推测性巨内核调度</li>
+<li>训练时同时饱和 NVLink、ALU 与 Tensor Core；RL 采样时达到 NVLink 与 HBM 设定的延迟下限</li>
+</ul>
+<h2>配方细节</h2>
+<ul>
+<li>最后 1/6 的层保持更高精度，用 MXFP8 而不用 BF16；NVIDIA 的配方是 15%，预训练阶梯里层数按 6 的倍数缩放，取 1/6 正合适</li>
+<li>量化激活用 Four Over Six（4/6）：NVFP4 量化时从两个比例因子里选一个，降低量化误差；量化权重时不用 4/6</li>
+<li>借鉴 Composer 2：量化权重用每专家外层比例因子，量化激活用每 token 外层比例因子，效率更高、与批量无关、不用担心因果泄漏</li>
+<li>SFT 与 RL 全程不用改动；RL 里端到端大幅提速，奖励上测不到差别</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>十年前还不清楚神经网络能不能用少于 32 位的参数训练；2020 年 BF16 随 Ampere 首次上 NVIDIA GPU；今天 BF16 常被叫作高精度，8 位乃至 4 位格式训练已有稳健用法</li>
+<li>下一步：反向也用 FP4 算，以及配方在 NVIDIA 最新 Vera Rubin 系统上如何演进</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
