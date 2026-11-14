@@ -538,6 +538,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">Kernel 优化</span><span>收藏于 2026-11-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">44</span>《Sharpness 与稳定性边缘》预训练里损失曲率为何总在 2/η 附近徘徊</h3>
+  <p>Sharpness 是损失 Hessian 的最大特征值 λₘₐₓ，训练中它常常上升（progressive sharpening）；二次碗模型给出稳定性边界 λ = 2/η，但真实训练越过边界后不发散，而是在边界附近徘徊（edge of stability），损失继续下降。35M 模型实测：第 375 步穿过 λ = 200，此后在 220–280 之间震荡、中位数 260（比阈值高 30%）；河谷图景给出自稳定反馈环的直觉；Cohen 2021 与 Damian 2023 分别从实证与三次泰勒展开给出解释，但为何稳定在比阈值高 30% 的地方仍是未解问题。</p>
+  <div class="links">
+    <a class="cn" href="pages/sharpness-edge-of-stability.html">中文精读 →</a>
+    <a class="en" href="https://x.com/i/article/2116253105465798656">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">训练核心流程</span><span class="tag">训练确定性</span><span>收藏于 2026-11-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
