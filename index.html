@@ -498,6 +498,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span>收藏于 2026-11-13</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">40</span>《InferenceForge》智能体递归自改进优化推理服务</h3>
+  <p>递归自改进循环让现成编码智能体做 SLA 感知的推理优化：量指标、写微基准、找瓶颈、改代码、跑验证，9 轮迭代 3 天把 Kimi K3 在 30 tok/s SLA 下推到每 GPU 12.8k tok/s，高出已发表 AgentX 最佳 43%；三处 kernel 级修复：长注意力读至少分片 8 份（单步 522 微秒降到 126 微秒）、顺序递推改并行扫描（32K 组块 1199 微秒降到 426 微秒，快 2.8 倍）、缓存前缀一次打包成 FP8（每层 889 微秒降到 180 微秒）；Kimi K3 峰值 16.2k tok/s/GPU 高出 29%，Kimi K3.1 高出 5%，GLM-5.3 峰值高出 12%、首 token p90 4.5 秒。</p>
+  <div class="links">
+    <a class="cn" href="pages/inference-forge-agent-serving.html">中文精读 →</a>
+    <a class="en" href="https://agenteconomics.org/posts/inference-forge">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">Kernel 优化</span><span class="tag">AI Agent</span><span>收藏于 2026-11-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
