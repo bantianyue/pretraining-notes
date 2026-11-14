@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Helion 编译期启发式：读 kernel IR 给配置，不调参跑赢手写 Triton 1.18 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Helion 编译期启发式：读 kernel IR 给配置，不调参跑赢手写 Triton 1.18 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://pytorch.org/blog/fast-by-default-compile-time-heuristics-for-helion-kernels/">https://pytorch.org/blog/fast-by-default-compile-time-heuristics-for-helion-kernels/</a></div>
+<h1>Helion 编译期启发式：读 kernel IR 给配置，不调参跑赢手写 Triton 1.18 倍（中文精读）</h1>
+<ul>
+<li>原文：Fast by Default: Compile-Time Heuristics for Helion Kernels，PyTorch，2026-11-12</li>
+<li>原文链接：https://pytorch.org/blog/fast-by-default-compile-time-heuristics-for-helion-kernels/</li>
+<li>收藏日期：2026-11-14</li>
+<li>星级：4⭐</li>
+<li>主题：Kernel 优化 / 编译器 / 推理服务</li>
+</ul>
+<h2>一句话要点</h2>
+<p>编译期读 kernel 的 IR、做存活分析，直接算出 block 大小、warp 数、stage 数：线性注意力前向跑赢手写 FLA Triton 1.18 倍，vLLM 规约核跑赢手写 CUDA 1.27 倍，全量自调优只再多约 3%。</p>
+<h2>调参的代价</h2>
+<ul>
+<li>Helion 是 PyTorch 面向性能可移植机器学习 kernel 的 DSL，性能高度依赖 autotune：调一个 paged-attention kernel、72 个形状，quick 模式要 <strong>10 小时</strong>，full effort 要 <strong>25 小时</strong>。</li>
+<li>一个 Helion kernel 能 lower 成成千上万个不同的 Triton kernel；autotuner 要逐个编译、实测再选；成本按 kernel、按形状算，kernel、形状、硬件后端越多，问题越大。</li>
+<li>目标不是算出比 autotuner 更好的配置，而是再加一个取舍点：不花调参时间，拿到接近自调优的配置。</li>
+</ul>
+<h2>机制：存活分析 + 三族启发式</h2>
+<ul>
+<li>底层分析是存活分析：对编译器 IR 走每张图、找每个值最后一次被用在哪里，再猜它会被放在哪块内存里；在 kernel 的任意一步，给定一组候选 block 大小，算一个 CTA 在那一刻要多少寄存器、共享内存，Blackwell 上还要算多少张量内存。</li>
+<li>选启发式的方法是扫设备 IR、看 kernel 含有什么算子：含 matmul 的一律走 matmul 启发式，不管里面还有什么；无 matmul 的规约走规约启发式；其余走逐点启发式；extent 在编译期不全知道，启发式不触发，回退到原来的默认配置。</li>
+<li>两个关键量：占用率（一个 SM 一次能放几个 CTA；哪块空间先耗尽就由它决定）与寄存器压力（峰值存活寄存器摊到线程数上，看汇编器会不会被迫 spill）。</li>
+<li>matmul 启发式定 block 大小、stage 数、warp 数：CTA 数少于 SM 数就缩小 block；stage 能给多少给多少、但上限是共享内存；4 个 warp 以下或 M 块小于 64 用小同步 MMA，否则用大吞吐量的 wgmma / tcgen05；最后做一遍悲观可行性检查。</li>
+<li>多个 matmul 共用旋钮时按重要性排序：优先带循环携带累加器的 dot，再是动态 matmul 工作量，再是输出面积；高排名的赢。</li>
+<li>规约启发式类似：warp 数在"够用的 warp、常驻性、寄存器压力"三股力量之间取舍；block 大小缩回来买常驻性，但 stride 为 1 的轴不能缩太狠（丢加载合并）；一行被读两次（如 RMSNorm）时，允许常驻花一点代价、省第二次访存。</li>
+<li>启发式有两个用途：主启发式给出 autotune 关掉时的默认配置；autotune 开着时，辅助启发式生成约 <strong>5–20 个</strong>相关或替代配置，给 autotuner 当种子。</li>
+</ul>
+<h2>实测：不调参的配置质量</h2>
+<ul>
+<li>线性注意力（9 种变体、96 个组合，H100）：前向比手写 FLA Triton 快 <strong>1.18 倍</strong>，前向加反向快 <strong>1.12 倍</strong>；比 Helion 旧默认快 <strong>2.13 倍</strong>；旧默认是手写 FLA 的 0.52 倍，全量自调优到 1.26 倍。</li>
+<li>vLLM 规约核（6 个生产核、153 个组合，H100）：比 vLLM 手写 CUDA/C++ 算子快 <strong>1.27 倍</strong>，比 Helion 旧默认快 <strong>2.2 倍</strong>；全量自调优到 1.31 倍——autotune 只比免费算出的配置多 <strong>3%</strong> 左右。</li>
+<li>日常核对 torch.compile 最大自调优：10 个规约核、80 个组合，算出的配置是 <strong>1.09 倍</strong>，Helion 默认是 0.27 倍；13 个 matmul 核族、70 个形状，总体 <strong>1.88 倍</strong>，默认 0.51 倍；jagged HSTU attention 是真回归：旧默认 3.72 倍，启发式 3.27 倍。</li>
+<li>分析本身很便宜：开与不开启发式，编译一个 kernel 的时间差只有几十毫秒，淹没在 Triton 编译的噪声里。</li>
+</ul>
+<h2>种子：搜得更快，但终点不变</h2>
+<ul>
+<li>把算出的配置当 autotune 种子：38 个 matmul 与多 matmul kernel，每个一个形状，跑两次全量 autotune。</li>
+<li>到最优的 50% 以内：无种子要 <strong>35.5 个</strong>配置，有种子只要 <strong>1.0 个</strong>（35 倍少）；到 25% 以内：103.5 对 2.5（41 倍少）；到 5% 以内：255.5 对 175.0（只剩 1.5 倍）；搜完：521.5 对 420.5（只剩 1.2 倍）。</li>
+<li>种子没有让最终配置变得更好：两臂的赢家在同一张 GPU 上重放，差距不到百分之零点几；这是搜索花多久的事，不是搜到哪里的事。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>重点不是静态分析打败了搜索，而是差距已经小到：对有些 kernel，跳过搜索是合理的选择；交付固定形状集、能一次性付得起调参代价时，全量 autotune 仍然是对的；变了的是，替代方案不再是很大的让步。</li>
+<li>局限是估计终究是近似的：启发式在猜另一个编译器会把值放在哪块内存；下一步是编译一次、读汇编器报的用量再修正估计，覆盖更多 kernel、碰更多旋钮。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
