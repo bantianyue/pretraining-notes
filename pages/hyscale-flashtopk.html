@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HyScale：FlashTopK 免分数表选 top-k，GLM-5.1 百万 token 训练快 2.07 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>HyScale：FlashTopK 免分数表选 top-k，GLM-5.1 百万 token 训练快 2.07 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2610.32057">https://arxiv.org/abs/2610.32057</a></div>
+<h1>HyScale：FlashTopK 免分数表选 top-k，GLM-5.1 百万 token 训练快 2.07 倍（中文精读）</h1>
+<ul>
+<li>原文：HyScale: Scaling Long-Context Training for Learned Sparse Attention，腾讯混元，arXiv:2610.32057，2026-10</li>
+<li>原文链接：https://arxiv.org/abs/2610.32057</li>
+<li>收藏日期：2026-11-14</li>
+<li>星级：4⭐</li>
+<li>主题：长上下文训练 / 稀疏注意力 / Kernel 优化</li>
+</ul>
+<h2>一句话要点</h2>
+<p>选分的输出不是连续激活，而是一组离散下标：FlashTopK 边打分边选 top-k，分数表永不落盘；选择重放让重算只重打 k 个分。512 张 H20 上，GLM-5.1 百万 token 训练快 2.07 倍。</p>
+<h2>瓶颈在哪</h2>
+<ul>
+<li>学习型稀疏注意力每 query 只读 k 个 token，但选分要给每个 query 的全部历史 token 打分：Megatron-LM 训 GLM-5.1 时，1M 上下文下选分独占单步的 <strong>47%</strong>，是稀疏注意力本身的 <strong>6.6 倍</strong>。</li>
+<li>选分慢的根子在分数表：给 L 个 token 打分要写一张 L 大小的分数表，再读回来选 top-k；表越大，访存越贵。</li>
+<li>更深的问题在重算：反向重算前向时，选分也要重打一遍，O(L) 的选分在重算里又付一次。</li>
+</ul>
+<h2>FlashTopK：边打分边选</h2>
+<ul>
+<li>洞察是选分输出只是下标：top-k 的结果是一组 token 下标，不需要把整张分数表写下来。</li>
+<li>FlashTopK 用乐观阈值边打分边选：先给阈值定一个乐观估计，打分过程中动态收紧，只保留高于阈值的候选；分数表永不落盘。</li>
+<li>效果：FlashTopK 比 cuDNN 快 <strong>1.84–2.80 倍</strong>；分数表 32 GiB 变成下标索引 <strong>64 MiB</strong>；前向选分 <strong>35.9 秒 → 20.8 秒</strong>。</li>
+<li>失败率极低：随机权重下 82% 的选分会失败（阈值估计失效），FlashTopK 的失败只有 <strong>5 / 81.8M</strong>，少 <strong>15,000 倍</strong>；训练早期的数值爆炸（17 倍 / 13 倍）也被压住。</li>
+</ul>
+<h2>选择重放：重算只重打 k 个分</h2>
+<ul>
+<li>前向把选出的下标留下来；反向重算时，只对这 k 个 token 重新打分，不用重扫全部 L 个历史 token。</li>
+<li>选分重算从 O(L) 降到 O(k)：重算选分 <strong>37.0 秒 → 1.0 秒</strong>；流水线等待 <strong>106.6 秒 → 51.7 秒</strong>。</li>
+<li>两个 top-k 集合高度重合：共享 top-2048 占 <strong>71%</strong>，并集只有 1.29 倍；重放的下标与重算的下标基本一致，精度不受损。</li>
+</ul>
+<h2>端到端效果</h2>
+<ul>
+<li>GLM-5.1 百万 token 训练：512 张 H20 上快 <strong>2.07 倍</strong>；256K 上下文 <strong>1.23 倍</strong>，512K 上下文 <strong>1.44 倍</strong>。</li>
+<li>块级 CSA 与 QSA 层：1M 上下文、32 张 H800 上分别快 <strong>2.01 倍</strong>与 <strong>1.57 倍</strong>。</li>
+<li>步时间：HyScale 步时间只涨 <strong>1.27 倍</strong>（上下文 128K → 8M），基线涨 <strong>2.13 倍</strong>；MFU 从 20.9% 升到 27.8%，基线从 17.1% 跌到 13.5%。</li>
+<li>强扩展：到 256 卡，每翻倍快 <strong>1.65–1.96 倍</strong>；弱扩展：128K → 8M 上下文，HyScale 总耗时只涨 <strong>11 倍</strong>，基线涨 <strong>190 倍</strong>，加速比从 1.24 倍拉到 <strong>22.3 倍</strong>。</li>
+<li>消融：三项改进共省 <strong>66%</strong> 步时间——FlashTopK 37%、选择重放 18%、系统优化 11%。</li>
+</ul>
+<h2>硬件层面的观察</h2>
+<ul>
+<li>选分是访存 bound：L2 缺失率 53–65%，warp 停顿 40–44%，Tensor Core 利用率只有 21–32%；FlashTopK 把分数表从 HBM 里拿掉，直接对症。</li>
+<li>显存占用：FlashTopK 选分只用 <strong>1.3–1.4 GiB</strong>，对照组 3.1 GiB 与 12–48 GiB；百万 token 训练不再被分数表卡显存。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>稀疏注意力的瓶颈不在注意力本身，在选分；选分输出是下标这个性质，让分数表可以根本不写、重算可以只重打 k 个。</li>
+<li>这套打法不依赖特定稀疏模式：任何"选分输出是下标"的学习型稀疏注意力都能用；下一步是把同样的思路推到推理侧的选分与 KV 选择上。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
