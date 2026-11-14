@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 加速器入门：乘积累加、内存瓶颈与 Eyeriss 行驻留数据流 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>AI 加速器入门：乘积累加、内存瓶颈与 Eyeriss 行驻留数据流</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.siliconcodesign.com/p/ai-accelerators-a-primer">https://www.siliconcodesign.com/p/ai-accelerators-a-primer</a></div>
+<h1>AI 加速器入门：乘积累加、内存瓶颈与 Eyeriss 行驻留数据流——中文精读</h1>
+<ul>
+<li>原文：Silicon Codesign《An Overview of AI Accelerators: MAC Operations, DRAM/SRAM, Performance Metrics, and Architecture》（2026-01-27），https://www.siliconcodesign.com/p/ai-accelerators-a-primer</li>
+<li>星级：4⭐（AI 加速器架构入门；MAC、内存层次与 Eyeriss 数据流，推理性能优化的基础）</li>
+<li>主题：并行策略（推理）；标签：并行策略（推理）、Kernel 优化</li>
+</ul>
+<h2>一句话要点</h2>
+<p>AI 加速器的核心矛盾不在算术而在数据搬运：乘积累加（MAC）是深度学习的心脏，冯·诺依曼架构下算力受限于内存带宽与每字节能耗；Eyeriss 用 168 个处理单元的 12×14 阵列、四级存储层次与行驻留数据流把数据复用做到极致，尽量少碰 DRAM。</p>
+<h2>核心机制</h2>
+<p><strong>乘积累加（MAC）。</strong>y = Σᵢ(wᵢxᵢ) + b 再过非线性（ReLU），输出端 sigmoid/softmax 转概率。两个直觉：MAC 类似生物神经元（权重决定响应什么模式）；神经元是模式检测器，输入模式与权重组合相关时输出就高。</p>
+<p><strong>DNN 与 CNN。</strong>前馈网络里神经元并排成流水线，隐藏层从简单特征（边缘/纹理）建到复杂特征（形状/物体）。训练是反向传播学权重，推理是跑训练好的模型。CNN 用小滤波器按步长滑过输入：边缘检测器最简单；输出特征图（ofmap）是滤波器滑过输入、沿途累加部分和（psum）算出来的，再归一化、池化。硬件层面两个关键点：滤波器权重可复用；张量形状与数据依赖事前已知，可预先规划分块与数据移动。</p>
+<p><strong>冯·诺依曼瓶颈。</strong>计算与内存分开：数据从内存取到 CPU 本地、算完写回。挑战：计算吞吐量增速超过内存带宽/延迟改进；传输速率有上限、每次取数能耗高。把计算与内存放同一芯片不划算：逻辑优化开关速度与布线便利，内存要求高密度与容量。经典缓解是层次化缓存，利用空间局部性。</p>
+<p><strong>内存：DRAM 与 SRAM。</strong>朴素实现里每个 MAC 要 3 次读（权重、激活、累加的部分和）加 1 次写（更新后的部分和）。DRAM：电容存电荷、晶体管经字线读写，二维网格寻址；便宜、密度高，但易失、要定期刷新、持续供电。SRAM：6 晶体管交叉耦合反相器锁存，写时位线要够强才能打断反馈环翻转状态；更快、每次访问能耗更低、易集成，但密度低得多、每比特成本更高。</p>
+<p><strong>内存的代价。</strong>DRAM 访问能耗比片上内存高 1 到 2 个数量级（主因是电容泄漏要不断刷新）；DRAM 带宽有限（总线延迟/吞吐 + 行激活、命令延迟、预充电）。趋势：HBM（堆叠 DRAM 紧贴计算封装）、片上内存层次化、存内/近存计算（权重存电阻电导）。</p>
+<p><strong>性能指标。</strong>模型侧：准确率与鲁棒性、网络架构、权重数量、MAC 操作数；常用归一化每 MAC 能耗横向比较。硬件侧：能量与功耗、低延迟、高吞吐、硬件成本，按应用取舍。</p>
+<p><strong>Eyeriss。</strong>为 AI 计算的确定性优化：滤波器、ifmap 尺寸形状已知，就能针对硬件优化数据流。构件：处理引擎（PE，16 位两级流水线乘法器与加法器 + 权重 scratch pad）；片上网络（168 个 PE 排成 12×14 空间架构，各 PE 独立运行、NoC 协调数据移动）；四级存储层次（片外 DRAM → 108kB 全局缓冲 → NoC 复用路径 → PE 本地 scratch pad，每块 520 字节）。目标：尽量复用低成本 scratch pad 与 PE 间通信，少碰高成本 DRAM 与 GLB。</p>
+<p><strong>行驻留（Row Stationary）数据流。</strong>把矩阵乘法切成一维卷积原语再组成二维卷积集。一维原语是滑动窗口：滤波器权重固定在内存里，ifmap 滑过，权重与激活复用多次再回 DRAM/GLB，部分和累加成 ofmap。二维集里权重按行写进 scratch pad、沿对角线滑过，顺序是横向复用滤波器行、对角线复用 ifmap、纵向累加部分和。挑战是把 PE 集干净地映射到 PE 阵列上，超阵列尺寸的原语能耗代价大。其他优化：游程压缩（压缩连续 0）、只激活与标签对应的总线。芯片面积的大头是内存。</p>
+<h2>结论</h2>
+<p>MAC 是大多数 DNN 负载的核心原语；DNN 层是重复点积，复用潜力大；性能常受限于内存搬运而不是算术；加速器靠最大化复用、最小化 DRAM 流量的数据流与存储层次取胜。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
