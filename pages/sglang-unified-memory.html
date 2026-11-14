@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang 统一内存：三类状态共用一个 arena，千并发下首 token 从 43 秒降到 6 秒 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang 统一内存：三类状态共用一个 arena，千并发下首 token 从 43 秒降到 6 秒</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-11-unified-memory/">https://www.lmsys.org/blog/2026-11-11-unified-memory/</a></div>
+<h1>SGLang 统一内存：三类状态共用一个 arena，千并发下首 token 从 43 秒降到 6 秒（中文精读）</h1>
+<ul>
+<li>原文：Unified Memory in SGLang: One Arena for Every Token Lifetime，LMSYS，2026-11-11</li>
+<li>原文链接：https://www.lmsys.org/blog/2026-11-11-unified-memory/</li>
+<li>收藏日期：2026-11-14</li>
+<li>星级：4⭐</li>
+<li>主题：推理服务 / KV 缓存 / 混合模型</li>
+</ul>
+<h2>一句话要点</h2>
+<p>三类状态共用一个 arena，容量跟随需求走：一 token 的全部层 KV 行打包成一条 entry，同进同出。GPT-OSS-20B 千并发下同时跑约 1,000 个请求对 618 个，首 token 从 43 秒降到 6 秒。</p>
+<h2>分池的问题</h2>
+<ul>
+<li>混合模型把三类状态塞进同一张 GPU：全文 KV、滑窗 KV、循环状态。SGLang 默认给每类一个子池，启动时按比例把显存切死——比例要在流量到来之前定好，流量一变，空闲字节就困在用不上的池子里。</li>
+<li>三类需求不同步增长：长上下文 workload 涨全文 KV；大量短并发请求要更多滑窗 KV 与状态槽，哪怕每个请求的历史都很小；同一请求内也会变：状态槽启动时就占了，全文 KV 持续增长。</li>
+<li>一个 unit 是子池的分配单位：KV 的一页，或循环状态的一个槽；每个子池有自己的 unit 大小，由它的层决定。</li>
+</ul>
+<h2>一个 arena，不用配比</h2>
+<ul>
+<li>全文 KV 从高端往下长，有界状态从低端往上长；惰性压缩把活数据推向两端，空闲字节在中间形成一块谁也不占的区域，谁需要谁按自己的 unit 大小取。</li>
+<li>比例旗只剩启动时的尺寸目标，运行时不再是墙；内存按整页发，空页可完整复用；压缩只把空闲字节挪给需要的子池。</li>
+<li>子池占 arena 里一段连续 band；两端 band 向内长，夹在中间的子池是浮动 band，可以移动、让出有用的空隙；band 的增长、收缩、压缩、搬迁改变的是谁能用空闲字节，不是请求数据的寻址。</li>
+</ul>
+<h2>一 token 一条 entry</h2>
+<ul>
+<li>分开的池每层一个 buffer；统一内存把一 token 在全部层的行打包成一条 entry，一页是一串 entry；分配、逐出、整页移动于是同时作用于全部层。</li>
+<li>entry 里每组行自带形状与 dtype：状态 entry 的 conv 与 temporal 状态各用自己的 dtype，融合 draft 的行与目标的 K、V 并排；这才让兼容的推测解码 draft 把 KV 放进目标 entry 里的额外 lane。</li>
+<li>目标与 draft 共享 token id，一次分配、释放、整页移动带走两者；K3.1 需要这个：DSA 层的每个 token 在 MLA KV 旁有一个 top-k 索引，索引与它指向的 KV 一起分配、释放、移动。</li>
+</ul>
+<h2>准入：整条请求放得下吗</h2>
+<ul>
+<li>共享字节不等于把请求占用的空间折成全文 token 数：32K token 的请求，模型另有 4K token 滑窗；64 token 一页时，稳态占用 <strong>512 页全文 KV + 64 页滑窗页</strong>；循环状态模型则要为运行中的请求加一个状态槽。</li>
+<li>分配器按实际必须支撑的联合需求定价，不是理想化的最终占用；同一套需求计算服务于 memory clip、prefill 准入、跨 chunk 的持续承诺、PD decode 预分配。</li>
+<li>host 侧快照驱动三级重排搜索：不动（复用洞、就地扩展 band）；只压两端（把两端 band 打包，释放它们的洞）；重排（同时搬迁两端之间被压实的浮动 band）。</li>
+</ul>
+<h2>安全：逻辑释放立即生效，物理复用等在途工作做完</h2>
+<ul>
+<li>4 种页状态：前沿之外、洞、Live、Pending；两种源侧保护：Vacated（已移动的源，旧读者还可能读它）、Fenced（前沿退却之外的旧字节，有未完成的读）。</li>
+<li>移动只改映射、不重写请求行；每个 band 有一份 page-use ledger，前向、HiCache 拷贝、网络传输、页面移动各自在里面记录读或写了哪些页、到什么时候。</li>
+<li>可行性与实现分开：可行性问是否存在某种布局能服务需求，实现先试当前布局、再找一个具体方案；可行性为真，是分配器能实现需求的承诺，不是要求在每个未完成的读或传输上都阻塞。</li>
+</ul>
+<h2>实测</h2>
+<ul>
+<li>GPT-OSS-20B（512 输入、1,536 输出 token，1,024 并发请求）：统一内存同时跑约 <strong>1,000 个</strong>请求，默认比例的分池跑 <strong>618 个</strong>，吞吐高 <strong>14%</strong>，首 token <strong>6 秒对 43 秒</strong>。</li>
+<li>配错比例代价高：<code>--swa-full-tokens-ratio</code> 设 0.1 比默认少 <strong>12%</strong> 吞吐（7,910 对 9,030 token/秒）；Qwen3.5-4B 上 <code>--mamba-full-memory-ratio</code> 0.3 把运行请求 cap 在 24（默认 51），少 <strong>14%</strong> 吞吐。</li>
+<li>Qwen3.5-4B（16K 输入、4,096 输出 token，并发 64）：跑 <strong>32 个对 22 个</strong>，快 <strong>26%</strong>。</li>
+<li>默认比例下无回归：Qwen3.5-4B（1,024 输入、256 输出 token，并发 64）：统一内存 <strong>5,830</strong> 输出 token/秒，分池 5,880；GSM8K（200 题）都是 <strong>0.875</strong>。</li>
+<li>回撤更少：Qwen3.5-4B（512 输入、16,384 输出 token，并发 51），统一内存每 1,000 个完成回撤约 <strong>233 个</strong>请求，默认池 294 个。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>内存系统按声明与需求统一管，而不是每个特性一个分配器：模型声明状态、一份 plan 建 arena；每个容量问题都用同一种方式问；每个页面的使用者都被记录下来。</li>
+<li>还是实验特性：优先抢占禁用、部分模型与后端不支持；但方向已经定了——容量跟随需求走，而不是流量去迁就启动时切死的比例。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
