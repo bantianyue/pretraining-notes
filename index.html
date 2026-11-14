@@ -508,6 +508,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">Kernel 优化</span><span class="tag">AI Agent</span><span>收藏于 2026-11-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">41</span>《LeapQuant》线性注意力递推状态 8bit 近无损量化</h3>
+  <p>免训练把线性注意力的递推状态量化到 8bit，精度与 FP32 基线相当：状态显存流量降 3.4 倍，端到端显存占用最多降 56%；kernel 层平均提速 2.05~3.70 倍，vLLM 端到端平均快 1.57 倍。三招：窗口量化（隔一个窗口再量化一次，误差 0.5%→1% 而不是 0.5%→10%）、补偿 token（离群值用高精度外积接住）、残差平滑（离群值从中位量级 176 倍降到 5.3 倍）；8bit 与 6bit 下三模型四任务平均 84.4 分，与 FP32 的 84.0 相当，4bit 只低 3.4 分，朴素 FP8/INT8 在 Qwen3.5-9B 上直接崩到接近 0 分。</p>
+  <div class="links">
+    <a class="cn" href="pages/leapquant-recurrent-state.html">中文精读 →</a>
+    <a class="en" href="https://leapquant.github.io/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">Kernel 优化</span><span class="tag">推理优化</span><span>收藏于 2026-11-14</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
