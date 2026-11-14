@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InferenceForge：智能体递归自改进优化推理服务 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>InferenceForge：智能体递归自改进优化推理服务</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://agenteconomics.org/posts/inference-forge">https://agenteconomics.org/posts/inference-forge</a></div>
+<h1>InferenceForge：智能体递归自改进优化推理服务 — 中文精读</h1>
+<blockquote>
+<p>原文：<a href="https://agenteconomics.org/posts/inference-forge">InferenceForge: Agents Optimizing Agentic Serving</a>（Agent Economics 博客）
+收藏：2026-11-14，星级 4⭐（重点阅读：智能体闭环优化推理服务 + 三处 kernel 级修复 + 三模型实测前沿）
+主题：并行策略（推理）/ 推理优化 / Kernel 优化 / AI Agent</p>
+</blockquote>
+<h2>一句话要点</h2>
+<p>InferenceForge 是一个递归自改进循环：定制环境、harness 与评估套件组成，让现成编码智能体做 SLA 感知的推理优化。智能体像资深工程师一样推服务性能：量缓存命中率与每 kernel 耗时，自己写测试脚本与微基准，找最关键瓶颈，做针对性优化，跑完测试与验证。9 轮迭代 3 天，Kimi K3 在每用户 30 tok/s 的 SLA 下推到每 GPU 12.8k tok/s，高出已发表 AgentX 最佳 43%。</p>
+<h2>循环怎么工作</h2>
+<ul>
+<li>优化目标带 SLA 约束：每用户解码速度不低于 30 tok/s，在这个前提下把总吞吐推到最高。</li>
+<li>9 轮迭代的最优结果：起点是已发表的 AgentX 最佳结果 8.9k tok/s/GPU，第 1 轮涨 2.0%，第 4 轮一次涨 14.3%，第 5 轮修复 1 与修复 2 落地再涨 7.5%，第 6 轮修复 3 落地涨 4.4%，第 9 轮达到 12.8k。</li>
+<li>涨幅最大的三处修复都与 Agent 流量形态有关：少数极长上下文旁边挤着大量短上下文。三处修复都提交到团队维护的 SGLang 分支。</li>
+</ul>
+<h2>三处关键修复</h2>
+<h3>修复 1：长注意力读至少分片 8 份</h3>
+<ul>
+<li>解码 kernel 原来只按 batch 大小决定每个请求的上下文切成几份，并发请求到 40 个以上时，每个请求只分到一个线程块，最长上下文决定了每一步解码的时间：AgentX 负载下每步解码 417 微秒，长度均匀时只要 55 微秒。</li>
+<li>改成每个请求至少分片 8 份：一个 900K token 请求的单步从 522 微秒降到 126 微秒，空闲线程块全部用上。加上修复 2，第 5 轮迭代在 SLA 点上增长 7.5%，从 10.9k 涨到 11.8k tok/s/GPU。</li>
+</ul>
+<h3>修复 2：顺序递推改并行扫描</h3>
+<ul>
+<li>K3 的线性注意力层每次更新状态只处理 64 个 token，32K token 的 prefill 组块要串行跑 512 步，只用到 GPU 148 个 SM 里的 48 个。</li>
+<li>智能体发现这次更新是仿射变换，可以并行：8 段并行算，再把各段状态串起来。三阶段并行扫描把 32K 组块从 1199 微秒降到 426 微秒，快 2.8 倍。</li>
+</ul>
+<h3>修复 3：缓存前缀一次打包成 FP8</h3>
+<ul>
+<li>缓存前缀很长时，每个注意力层先用跨步拷贝重建 K 与 V，再分两步转 FP8。</li>
+<li>智能体写了一个 kernel，打包与转码一次做完，与原来逐位相同，100K token 前缀下每层从 889 微秒降到 180 微秒。第 6 轮迭代里这处修复加上一处较小的 MoE 路由改动，在 SLA 点上增长 4.4%，从 11.8k 涨到 12.3k tok/s/GPU。</li>
+</ul>
+<h2>三模型实测前沿</h2>
+<ul>
+<li>每张图都是一小时 AgentX 运行攒出的服务前沿：同时服务的用户越多，总吞吐越高，但每用户看到的解码中位速度越低；每个点是一次运行，前沿是每个速度下达到的最高吞吐。灰色线是 SemiAnalysis 已发表的同模型 B300 前沿（11 月 10 日拉取）。</li>
+<li><strong>Kimi K3</strong>：单台 8×B300 节点，峰值 16.2k tok/s/GPU，高出已发表 AgentX 最佳 29%。只看 SLA 点，12.8k 已经超过已发表系统不带 SLA 的峰值。</li>
+<li><strong>Kimi K3.1</strong>：每用户 56 tok/s 时 23.7k tok/s/GPU，高出已发表最佳（SGLang，53 tok/s 时 22.6k）5%，同时每用户速度也更快，领先在整条前沿上都成立。</li>
+<li><strong>GLM-5.3</strong>：主要冲峰值吞吐。SemiAnalysis 还没有 GLM-5.3 的榜单，对照用同架构的 GLM-5.2 已发表最佳。在已发表峰值点，每 GPU 多服务 12%，首 token p90 4.5 秒，低于已发表的 13.2 秒；领先一直保持到每用户 160 tok/s。</li>
+</ul>
+<h2>下一步</h2>
+<ul>
+<li>把自己的模型放进循环：FireFlash（团队开源 RL 路线训出的 Agent 模型），以及专门为推理优化做后训练的模型。</li>
+<li>循环本身不变，优化器从现成编码智能体换成专为推理优化训练的模型，目标还是同一个：在 SLA 约束下把每 GPU 吞吐推得更高。</li>
+</ul>
+<h2>对推理优化的含义</h2>
+<ul>
+<li>优化对象是流量形态，不是模型权重：三处修复全是 Agent 负载的长尾问题（极长上下文拖慢整批、串行递推只用三分之一 SM、长前缀的重复拷贝与转码），通用基准测不出来。</li>
+<li>循环的价值在可复用：环境、harness 与评估套件一旦存在，新模型（K3.1、GLM-5.3）能再开一轮，而不是另立一个项目。</li>
+<li>评估基准就是产品：Agent 优化被测量的东西，AgentX 的 SLA 前沿与一小时运行定义了什么是收益，守卫（延迟 SLA）决定了什么是作弊。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
