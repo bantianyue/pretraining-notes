@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AMD GPU-initiated SDMA：1个CU跑满带宽 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>AMD GPU-initiated SDMA：1个CU跑满带宽</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://rocm.blogs.amd.com/software-tools-optimization/gpu-initiated-sdma/README.html">https://rocm.blogs.amd.com/software-tools-optimization/gpu-initiated-sdma/README.html</a></div>
+<h1>AMD GPU-initiated SDMA：1 个 CU 跑满带宽（中文精读）</h1>
+<ul>
+<li>原文：GPU-Initiated DMA Copy Engines in RCCL and rocSHMEM，AMD ROCm Blogs，2026-11-13</li>
+<li>原文链接：https://rocm.blogs.amd.com/software-tools-optimization/gpu-initiated-sdma/README.html</li>
+<li>收藏日期：2026-11-15</li>
+<li>星级：4⭐</li>
+<li>主题：GPU 通信 / 性能优化 / 集合通信</li>
+</ul>
+<h2>一句话要点</h2>
+<p>GPU kernel 直接把节点内拷贝下发给 SDMA 引擎，不再用 CU 做 load/store 搬数据：8 张 MI350X 上，1 个 CU 的带宽与默认实现 64 个 CU 相当或略高，省下的 CU 全还给计算。</p>
+<h2>为什么通信要从 CU 手里拿走</h2>
+<ul>
+<li>GPU 负载扩到多卡、多节点后，卡间通信的效率决定了整体性能。推理尤其如此：通信在关键路径上，传统的计算通信重叠做不到 kernel 级的精细编排就落不了地。</li>
+<li>设备侧 API 之所以关键，是因为它们让计算与通信能融进同一个 kernel。RCCL 最近引入了 GPU-initiated 通信：scale-up 域内走常规 load/store，跨节点走 GPU-initiated networking（GIN）；rocSHMEM 从一开始就是按这个能力设计的。</li>
+</ul>
+<h2>三种搬运方式：谁发起，谁搬运</h2>
+<ul>
+<li>GPU 搬数据有两条路：CU 执行 load/store 指令，或者专用的 DMA 拷贝引擎（AMD 硬件上叫 SDMA）。另一个维度是谁发起传输：CPU，还是正在跑的 GPU kernel。</li>
+<li>GPU load/store 通信：GPU kernel 发起，CU 执行 load/store 指令，CU 执行拷贝工作。</li>
+<li>CPU 发起 SDMA：CPU 发起，SDMA 引擎搬运，CU 不执行拷贝。</li>
+<li>GPU 发起 SDMA：GPU kernel 发起，SDMA 引擎搬运，CU 只发命令、协调完成。</li>
+<li>GPU-initiated 通信本身不是新东西，这次发布的区别在于 scale-up 域内也支持了 GPU-initiated 通信，而且走 SDMA 拷贝引擎而不是计算单元。AMD GPU 上的 SDMA 引擎足够多，能把 scale-up 域内的可用带宽跑满。</li>
+<li>关键优势在资源利用：常规的计算通信融合 kernel 里，计算单元既要算、又要搬数据，抢同一批共享资源。把通信经 GPU-initiated 命令 offload 到 SDMA 引擎，计算资源就全留给 kernel 的计算部分；只要 1 个 CU 就能跑满带宽，也就是发 SDMA 命令的那一个。</li>
+</ul>
+<h2>机制：ring buffer 加 doorbell</h2>
+<ul>
+<li>每个图形计算芯片（GCD）有多个 SDMA 引擎做拷贝。底层看，SDMA 引擎是可编程 DMA 引擎（精神上接近 RDMA 网卡），但为节点内或 pod 内的 GPU 间通信设计。</li>
+<li>控制方式是 ring buffer 加 doorbell：ring buffer 里填 DMA 命令（线性拷贝、带融合信号的拷贝、原子操作等），doorbell 机制触发消费 ring 里待处理的条目。</li>
+<li>CPU 发起的操作走标准的 ROCm 运行时 hipMemcpyAsync API，复杂性被抽象掉；设备发起的操作由 RCCL-GIN 与 rocSHMEM 在内部准备 SDMA 包，给设备 kernel 同样透明的接口。</li>
+</ul>
+<h2>RCCL 实测：1 个 CU 对 64 个 CU</h2>
+<ul>
+<li>8 张 AMD Instinct MI350X 单节点，比较三种实现：默认 RCCL（load/store 指令）、CPU 发起 SDMA（Host-SDMA）、GPU 发起 SDMA（GIN-SDMA）。Host-SDMA 与 GIN-SDMA 依赖对称内存注册，默认实现不依赖。</li>
+<li>大消息上，SDMA 实现的带宽与默认实现相当、略高。AlltoAll 大于 32 MiB 用 GIN-SDMA 后端，更小消息用向量 load-store；Allgather 大于等于 512 KiB 用 GIN-SDMA。</li>
+<li>GIN-SDMA 带宽高于默认实现，用的却只有 1 个 CU，而默认 RCCL 算法要 64 个 CU。</li>
+</ul>
+<h2>rocSHMEM 实测：1 个 wavefront 就够</h2>
+<ul>
+<li>rocshmem_alltoall_wg（8 张 MI350X，单 CU）：SDMA 开（1 个 CU、1 个 wavefront）显著高于 SDMA 关（1 个 CU、16 个 wavefronts），因为单 CU 靠常规 load/store 根本跑不满可用带宽。</li>
+<li>putnbi（两张 MI350X）：128 KiB 时单 CU 开与不开的带宽相近，大量 CU 加 SDMA 关在这个消息尺寸上能推更高。512 KiB 及以上，SDMA 开的带宽最高，与配置无关。</li>
+<li>当前 rocSHMEM 实现在 128 KiB 以下不用 SDMA；64 KiB 时 4 wavefronts 的配置优于单 wavefront，因为 load/store 路径受益于更多 wavefront；一旦用上 SDMA，单 CU 单 wavefront 就够跑满峰值带宽。</li>
+</ul>
+<h2>怎么开：两行配置</h2>
+<ul>
+<li>ROCm 10.1 起的 RCCL 与 rocSHMEM 里可用；用之前从 GitHub 下源码构建。</li>
+<li>RCCL：对称内存注册与 cuMem（NCCL_CUMEM_ENABLE=1）是启用 GIN 的前置条件；SDMA 后端用环境变量 NCCL_GIN_TYPE=7 启用；构建命令 <code>install.sh --rocshmem-gin</code>。</li>
+<li>rocSHMEM：构建 <code>./scripts/build_configs/all_backends -DUSE_SDMA=ON</code>；运行 <code>ROCSHMEM_SDMA_ENABLED=1</code>，阈值 <code>ROCSHMEM_SDMA_THRESHOLD</code> 控制 IPC/LSA 与 SDMA 的切换点（alltoall 用 2048，putnbi 用 1024）。</li>
+<li>版本：RCCL 2.32.3-develop，HIP 7.0.51831，ROCm 7.0.2.2.0；rocSHMEM v3.8.0，ROCm 10.1.0。实验由 AMD 集合通信团队的工程师测得，重复 5–7 次，结果稳定。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>GPU-initiated SDMA 的要点不在带宽数字本身，而在归属：搬运从 CU 手里拿走，交给 SDMA 引擎；发起权从 CPU 手里拿走，交给正在跑的 kernel。带宽没变少，CU 空出来了。</li>
+<li>代价是明确的：大消息才划算（AlltoAll 大于 32 MiB、Allgather 大于等于 512 KiB、putnbi 大于等于 512 KiB），小消息仍走 load/store；启用要对称内存注册与 cuMem。</li>
+<li>对推理负载尤其有价值：通信在关键路径上，计算与通信的精细重叠必不可少——而这正是设备侧 API 存在的意义：kernel 自己发命令，DMA 引擎在后台搬数据，两边不再抢同一个 CU。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
