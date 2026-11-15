@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTTP LoRA 同步：训练在一处，rollout 跨 B300/H200/MI355X/MI300X · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>HTTP LoRA 同步：训练在一处，rollout 跨 B300/H200/MI355X/MI300X</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.aiand.com/newsroom/rl-heterogeneous-hardware">https://www.aiand.com/newsroom/rl-heterogeneous-hardware</a></div>
+<h1>HTTP LoRA 同步：训练在一处，rollout 跨 B300/H200/MI355X/MI300X（中文精读）</h1>
+<ul>
+<li>原文：RL Training Across Heterogeneous Hardware，ai&amp;，2026-11-13</li>
+<li>原文链接：https://www.aiand.com/newsroom/rl-heterogeneous-hardware</li>
+<li>收藏日期：2026-11-15</li>
+<li>星级：4⭐</li>
+<li>主题：RL 训练 / 推理服务 / KV 缓存 / 异构硬件</li>
+</ul>
+<h2>一句话要点</h2>
+<p>一个 B300 训练器加四台异构 rollout 引擎（B300、H200、MI355X、MI300X），靠纯 HTTP 分块同步 LoRA 权重跑 GRPO：生成从 2,690 提到 5,190 token/s（1.9 倍），第 1 步等待从 51 分钟压到 2 分钟内；代价是同步本身只占步时的 2%，真正的瓶颈是 KV 缓存容量与数值对齐。</p>
+<h2>训练与 rollout 为什么要拆开</h2>
+<ul>
+<li>训练要的是大矩阵乘法的吞吐与高精度梯度；rollout 要的是低延迟采样与大 KV 缓存。同一台机器上两者抢显存、抢带宽，互相拖慢。</li>
+<li>拆开之后，训练器可以留在最强的卡上，rollout 可以去任何有空闲算力的芯片上——包括训练框架不支持、驱动不互通的芯片。NCCL 只在同厂商内通，RCCL 与 NCCL 之间没有跨厂商集合通信，这是拆开后必须解决的第一个问题。</li>
+<li>这篇的答案不是造一条新互联，而是把权重同步降级成最普通的协议：HTTP。LoRA adapter 只有 4 GB（8 个 512 MB 块），分块发过去，引擎原地换权重，不重启。</li>
+</ul>
+<h2>三道门：厂商无关的契约</h2>
+<ul>
+<li>任何芯片上的引擎，要和 B300 上的引擎守同一份契约，否则采样出来的数据不在同一个分布上，训练会被带偏。契约三条：</li>
+<li><strong>数值正确</strong>：同一 prompt、同一温度，采样分布要对齐。用训练/rollout KL 衡量：第 0 步各引擎 KL（×10⁻³）落在 13.9–15.7（MI355X）与 16.6–16.7（B300）之间，在两次运行的波动之内。</li>
+<li><strong>RL 需要的特性</strong>：logprobs、熵、采样温度控制、结构化输出，这些 RL 训练依赖的接口每台引擎都得有。</li>
+<li><strong>便宜的权重更新</strong>：每步都要把新 adapter 发到全部引擎，同步成本必须小到可以忽略。</li>
+<li>KV 缓存精度是数值对齐里最容易被忽略的一项：同样的参数，Blackwell 默认 fp8 KV，其余地方默认 bf16，容量差 2 倍，且无声无息。bf16 缓存离训练器近 2.4 倍。必须显式指定 fp8 KV 缓存，让全部引擎用同一精度。</li>
+</ul>
+<h2>HTTP LoRA 同步：六次调用</h2>
+<ul>
+<li>同步一个 adapter 要六次 HTTP 调用：训练器先问每台引擎的容量与状态，再把权重分块 POST 过去，引擎逐块校验、落盘、原地加载（upsert），最后回执确认。没有集合通信，没有共享文件系统，没有驱动层面的互通。</li>
+<li>关键设计是 <strong>upsert 而不是重启</strong>：<code>load_lora_adapter</code> 支持原地换 adapter，引擎在两次生成之间换权重，请求不中断。SGLang 上游改动之一就是这个：一个 adapter 载荷由每路 TP rank 共享，每台引擎只收一份。</li>
+<li>数字：InfiniBand 直传比 HTTP 快 6.5 倍，但同步本身只占步时的 2% 以内——HTTP 的慢，相对整个 RL 步来说可以忽略。第 0 步同步 160 秒，第 1 步 154 秒，十步稳定在 154–163 秒。</li>
+<li>权重更新的规模：adapter 4 GB，分 8 个 512 MB 块发：B300 引擎每块约 7.4 秒，MI355X 约 11 秒，最后换入 2 秒，差距在接收与解包张量，不在加载 adapter。100 MB/s 的公网路径上，adapter 约 40 秒，相对 50 分钟的一步可以忽略；100–800 Gbps 专线上不到 1 秒。709 GB 的全量权重在公网要约 2 小时，比一步还长——这就是只同步 LoRA 的原因。Qwen3-4B 的 rank-64 LoRA 只有 264 MB，每多一台引擎只加约 0.15 秒。</li>
+</ul>
+<h2>生成 1.9 倍：加节点，直到训练器成为瓶颈</h2>
+<ul>
+<li>第二台 MI355X 节点让生成几乎翻倍，从 2,690 提到 5,190 token/s（1.9 倍），第 1 步训练器的等待从 51 分钟压到 2 分钟内。一台 fp8 MI355X 节点离喂饱一台快的 8×B300 训练器还差一点；两台就有余量。</li>
+<li>瓶颈不在算力，在 KV 缓存容量：MI355X 的 3.0M token KV 能同时跑约 660 个请求，H200 的 0.4M 只能跑约 80 个。容量差直接变成吞吐差——旗舰全程 MI355X 2,490 token/s，对 H200 1,030 token/s。训练器全程都是 rollout 瓶颈：第一步之后，每步等 3 到 56 分钟，训练约 24 分钟。</li>
+<li>KV 精度影响的是数值对齐，不是吞吐：bf16 缓存离训练器近 2.4 倍，但占一倍容量。统一显式指定 fp8 KV 缓存，是让全部引擎守同一份契约的做法。</li>
+<li>8k token 的回答下训练器几乎不用等；12k token 时生成与训练各占约一半，rollout 一断，训练器就等。回答越长，rollout 瓶颈越明显。</li>
+</ul>
+<h2>旗舰跑：四种芯片、十步、48 卡</h2>
+<ul>
+<li>训练器跨两个 B300 节点（InfiniBand 互联）；rollout 池是 B300、MI355X、MI300X、H200 各一节点，共 48 卡。全部 fp8 KV 缓存，十步，零重启。</li>
+<li>全程生成 token/s：MI355X 2,490、 B300 1,790、MI300X 1,180、H200 1,030。MI355X 最快不是因为它算力最强，而是 KV 缓存最大（3.0M token），能同时跑约 660 个请求；H200 只有 0.4M KV，约 80 个请求。</li>
+<li>按 KV 容量加权路由比轮询整批快 25%，稳态吞吐高 11%。按每台引擎当前速度加权，没有比它更好。下一步是边际吞吐：每个请求发到多加一个请求时每秒 token 产出最多的地方。</li>
+<li>KL 从 16.6（×10⁻³）涨到 47.4：十步里 rollout 与训练器的分布越离越远。这是没有 off-policy 修正的代价——Modal 的实验里，没有修正，GRPO 在混合采样器上很快崩掉；即使硬件与精度都对齐，也只是撑得久一点。</li>
+<li>这套配置确实能学会东西：第一次测试用 GLM-5.2 744B，LoRA 在 B300 节点上训练、MI300X 池子 rollout，30 步 Countdown 跑约 10 小时，零同步失败；held-out 准确率从 0.820 升到 0.910（64 题，4,096 token 答案）。旗舰十步的原始奖励平坦且噪声大，对短跑的强模型是预期的，不对学习速度做结论。</li>
+</ul>
+<h2>踩过的坑</h2>
+<ul>
+<li>fp8 MoE 权重为某个 kernel 预先重排，引擎用的却不是它：输出流畅但是错的。只对正在用的 kernel 重排。</li>
+<li>注意力 matmul 的 tile 尺寸在某些 batch 下把编译器冲垮：65–256 行时崩溃。收紧 kernel 的块大小。</li>
+<li>数据并行注意力加 LoRA 再加 graphs：8 个 rank 里 7 个出错误输出。跑纯 TP8，不用数据并行注意力。</li>
+<li>默认的 fp8 KV 注意力 kernel 让首 token 的选择偏移：贪心答案出错。用 SGLang 官方手册里的 Hopper 注意力后端。</li>
+<li>两个规律：LoRA 是没人测过的路径；同样的启动参数给不出同样的引擎——每块芯片都悄悄选自己的 kernel 与默认值，值得逐台核对每台引擎实际解析出的配置。</li>
+</ul>
+<h2>发往上游的改动</h2>
+<ul>
+<li>Miles http-lora：经 HTTP 把 LoRA 权重同步给外部引擎，tensors 或 path 模式（已合入）。</li>
+<li>SGLang：一个 adapter 载荷由每路 TP rank 共享，每台引擎只收一份（已合入）；<code>load_lora_adapter</code> 支持 upsert，原地换 adapter（已合入）。</li>
+<li>Miles：GLM-5.x LoRA 在 tilelang 上的序列打包，训练步约快 2.2 倍（评审中）。</li>
+<li>sgl-router：capacity_aware 路由，按 KV 容量分配（评审中）。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>硬件多样性已经到了，软件成熟度才是差距。HTTP 同步把跨厂商的问题降级成一个已解决的问题（传文件），剩下的全是每台引擎自己的配置与 kernel 成熟度。</li>
+<li>这篇的边界很清楚：只在有 LoRA 的前提下成立（全参数微调的同步量是另一个量级）；只跑了十步，KL 还在涨，长期训练必须加 off-policy 修正；TPU、Intel GPU、Trainium 的 RL 路径更年轻，对齐要多花功夫。</li>
+<li>对照组：Core Automation 的《The Hitchhiker's Guide to Training on Compute Islands》做的是训练侧（跨两个相距约 9,000 英里的集群，每约 50 步交换一次压缩过的模型片段）；这篇是 rollout 侧的对照。训练与 rollout 两边都在往"岛"上拆，中间只剩最普通的协议。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
