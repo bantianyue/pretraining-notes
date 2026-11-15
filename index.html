@@ -608,6 +608,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">编译器</span><span class="tag">推理服务</span><span>收藏于 2026-11-14</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">51</span>《HTTP LoRA 同步》训练在一处，rollout 跨 B300/H200/MI355X/MI300X，生成提速 1.9 倍</h3>
+  <p>训练器留在一座岛上，rollout 散到其余岛上：LoRA adapter 4 GB 经纯 HTTP 分块同步，引擎原地换权重、不重启；第二台 MI355X 让生成从 2,690 提到 5,190 token/s，第 1 步等待从 51 分钟压到 2 分钟内。旗舰跑四种芯片、48 卡、十步零重启，同步只占步时 2%；KV 容量决定吞吐，精度决定数值对齐；十步 KL 从 16.6 涨到 47.4，长期训练要加 off-policy 修正。</p>
+  <div class="links">
+    <a class="cn" href="pages/rl-heterogeneous-hardware.html">中文精读 →</a>
+    <a class="en" href="https://www.aiand.com/newsroom/rl-heterogeneous-hardware">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">RL 训练</span><span class="tag">推理服务</span><span class="tag">KV 缓存</span><span>收藏于 2026-11-15</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
