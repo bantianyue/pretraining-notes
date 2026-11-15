@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mistral Large 4 注意力手术：KV 缓存压 16 倍拖垮 Agent · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Mistral Large 4 注意力手术：KV 缓存压 16 倍拖垮 Agent</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B/blob/main/assets/technical_report.pdf">https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B/blob/main/assets/technical_report.pdf</a></div>
+<h1>Mistral Large 4 注意力手术：KV 缓存压 16 倍拖垮 Agent（中文精读）</h1>
+<ul>
+<li>原文：Mistral Large 4 Technical Report，Mistral AI，2026-11</li>
+<li>原文链接：https://huggingface.co/mistralai/Mistral-Large-4-1T-A52B/blob/main/assets/technical_report.pdf</li>
+<li>收藏日期：2026-11-15</li>
+<li>星级：4⭐</li>
+<li>主题：KV 缓存 / 注意力架构 / 模型深拆</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Mistral Large 4 为省 KV 缓存叠了 SWA+CLA+YOCO 三层压缩，KV 压到十六分之一，语言建模 loss 看着没事，SFT 后 Agent 任务却掉了队；训练中途做「注意力手术」——拆滑窗、拆 CLA、补 KV 权重、留 YOCO、接 DSA 稀疏注意力——把 Agent 能力抢回来。</p>
+<h2>模型</h2>
+<ul>
+<li>Mistral Large 4（ML4）：52B 激活参数、1T 总参数的多模态 MoE，为推理与长程 Agent 任务设计。</li>
+<li>终评：FrontierCode 2.0 19.7%、Terminal-Bench 4.0 41%、Artificial Analysis Cyber Index 50.9%、Harvey 法律 Agent 基准 15%；安全聚合（JailbreakBench 安全回应率、StrongREJECT 拒绝率、AgentHarm 去害分三项均值）96.6%。</li>
+</ul>
+<h2>三层压缩：KV 压 16 倍</h2>
+<ul>
+<li>Ragged MLA：每四层里只有一层用全注意力，其余层用窗口 512 的滑窗注意力（SWA）。</li>
+<li>CLA（跨层注意力共享）：每隔一个全注意力层复用前一个全注意力层的 KV 缓存。</li>
+<li>YOCO：后半段 transformer 的全注意力层不维护自己的 KV 缓存，直接用前半段产生的 KV；除省缓存外，两阶段 prefill 在 1M 上下文上快 1.7 倍。</li>
+<li>三层叠加，KV 缓存压到全注意力基线的十六分之一。早期消融看着没问题：困惑度与常见预训练、后训练评测的影响要么可忽略，要么小到值得换效率。</li>
+</ul>
+<h2>诊断：loss 没事，Agent 任务掉队</h2>
+<ul>
+<li>预训练继续跑，中间检查点的 SFT 降温暴露了问题：预训练评测（困惑度、知识类基准）符合预期，SFT 后的 Agent 评测却低于预期，尤其需要长上下文推理的 SWE-bench 与 BrowseComp。</li>
+<li>同样训练 token 预算下，midtraining 与 SFT 后的 SWE-bench Verified 从全注意力到 SWA 下降，再加 CLA 继续掉。</li>
+<li>更普遍的结论：架构选择会对 Agent 能力征税——语言建模 loss 相同的模型，下游 Agent 任务的表现可以差很多；知识类评测（MMLU Redux）上没有这个差距。同等验证困惑度下，不同架构的 SWE-bench 能差 10 个点以上。拉长训练能部分弥补这个惩罚。</li>
+</ul>
+<h2>手术：拆滑窗、补 KV 权重、留 YOCO</h2>
+<ul>
+<li>时机：第二阶段预训练之前，改已经训出来的检查点。目标是去掉 KV 缓存压缩机制，尽可能接近全注意力模型；暂时牺牲推理优化，优先保证模型性能；难点是保住已经学到的东西。</li>
+<li>拆滑窗相对直接：让受影响的层能看完整上下文，不再只看前 512 个 token。</li>
+<li>拆 CLA 与 YOCO 的 KV 共享：原来靠前面层出 key、value 的层，现在要自己算、自己维护 KV 缓存。做法是给每个受影响的层补 KV-producer 权重，从最近的有自有 KV 权重的 long 层复制过来。CLA 的复制源是前一个 long 层（离得近、输入的残差流很像）；YOCO 的复制源是模型中点处的前一个产 KV 的 long 层（离得远）。</li>
+<li>在 8×10²² FLOPs 规模上做了「全手术」，但全尺寸模型里保留了 YOCO 的缓存复用——放大时去 YOCO 的结果是负面的。</li>
+</ul>
+<h2>小规模先验：8×10²² FLOPs 的对照</h2>
+<ul>
+<li>手术放在 midtraining 开头，或放在第二阶段预训练之前，之后都接 midtraining。对照：原来带 SWA、CLA、YOCO 的模型，和只用全注意力预训练的模型。</li>
+<li>midtraining-only 的变体用 YaRN；第二阶段预训练比较两个变体：Vanilla（去掉注意力窗口，不改 RoPE 频率）与 YaRN（去掉注意力窗口，RoPE 频率按 8 倍重缩放）。</li>
+<li>两个第二阶段方案都让训练困惑度更接近全注意力基线，但 SWE-bench 没跟上。改动更大的方案更难恢复，于是选了更保守的手术：转换后立刻保住性能、让训练能继续，同时引入可学习参数增加灵活性。</li>
+<li>LeRoPE 与 SSMax 的组合比固定 YaRN 的下游表现更好，尽管训练 loss 几乎一样。LeRoPE 与 SSMax 让模型学习旋转频率与每头 query 缩放。在一个中间的第二阶段检查点上，频率变化最大的两带在 4K 训练上下文附近：相对 YaRN 升约 1.5 倍与 1.8 倍，波长缩短 35% 与 44%；其余频带变化很小——适应是选择性的，不是均匀重缩放。</li>
+</ul>
+<h2>放大到全尺寸：YOCO 留下</h2>
+<ul>
+<li>小规模实验里拆了 YOCO，但全尺寸保留了它，原因是单独评估过这个选择：拆掉另一层共享机制会增加预训练检查点要适应的量。8×10²² 规模上，拆与不拆 YOCO、给足第二阶段加 midtraining 的恢复期，下游表现相当；但拆 YOCO 初期对 loss 的冲击更大。</li>
+<li>最终模型没法把整个第二阶段重跑一遍，于是在 8×10²³ FLOPs 规模上做了保守测试：手术加只 midtraining（对比手术加第二阶段加 midtraining），保留 YOCO 的表现更好。</li>
+<li>最终架构去掉了滑窗限制与 CLA，保留了后半段原全局注意力层之间的 YOCO 共享。原来的 SWA 层变成了独立的全上下文注意力层，LeRoPE 与 SSMax 提供额外灵活性；原来的 NoPE 全局层保持 NoPE，后半段的 YOCO 消费者继续复用前半段的 KV 表示。手术用在第一阶段结束的检查点上，训了约三分之二的原第二阶段，再进 midtraining。</li>
+<li>验证：用 32k token 的探针、六个数据源，分析中间检查点的注意力质量分布。转换层把约 55% 的注意力质量分给远端（512 token 以外）内容，原生 long 层是 67%。转换没有完全消除原来的初始化，但转换层在需要时能学会 long 层的角色。</li>
+</ul>
+<h2>再接 DSA：长上下文的便宜做法</h2>
+<ul>
+<li>DeepSeek 稀疏注意力（DSA）：轻量索引器给每个 query 选 top-2048 个 key token。</li>
+<li>第一阶段：索引器热身约 15.1B token，用 KL 蒸馏学主模型的注意力分布，主模型冻结、全注意力运行。</li>
+<li>第二阶段：主模型与索引器联合训练，再加 198B token，跑稀疏注意力。主模型用语言建模目标优化，索引器继续用辅助 KL 损失对齐主模型在选中 key 上的注意力分布。</li>
+<li>从 L16 起，原混合注意力组内的 SWA 层之间相似度很高，于是每组内的原 SWA 层共享一个 DSA 索引器。</li>
+</ul>
+<h2>手术后的部署账本</h2>
+<ul>
+<li>朴素张量并行延迟最好，但 KV 在各并行 rank 间复制，严重限制并发与 KV 缓存命中率。上下文并行（CP）沿序列维切分 KV 缓存去重，配合原生 FP8 KV 缓存与 offloading，在 4×GB300 上拿到约 2000 万 token 的内存 KV 空间。</li>
+<li>标准 CP 实现比 TP 基线差得多，原因是 kernel 低效；重写 CP 集合通信后，解码交互性提升 51%，通信开销相对 TP 不超过 10–15%。</li>
+<li>DSpark 推测解码：相对无推测解码的基线，延迟与吞吐提升 90%，相对 EAGLE-3 基线在 8 并发请求下 +15%。</li>
+<li>路由专家的 NVFP4 量化把检查点压到 606 GB，与 FP8 参照在全部评测上持平，部署在 4×GB300 上。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>KV 缓存压 16 倍的代价不在 loss 里，在 Agent 任务里：同等困惑度下 SWE-bench 能差 10 个点以上。只看困惑度与知识基准，省 KV 的架构看着全是赚的；加上长程 Agent 评测，账才算清。</li>
+<li>手术的思路是保守的：拆滑窗、拆 CLA、补 KV 权重、留 YOCO、让位置编码自己学，再用稀疏注意力把长上下文的账算回来。</li>
+<li>报告的结论：语言建模 loss 相当不等于长程任务表现相当，需要找新的、更好的代理指标；稀疏、线性与混合注意力架构的探索还在继续，Agent 评测要在整个训练过程中指导设计选择。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
