@@ -638,6 +638,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">GPU 通信</span><span class="tag">性能优化</span><span class="tag">集合通信</span><span>收藏于 2026-11-15</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">54</span>《Qwen3.8-Flash-Next 查表瘦身》51GB n-gram 表换 1.3GB，塞进 128GB 本机</h3>
+  <p>把 51GB 的 n-gram 查表换成 1.3GB 校准 per-token 表 U，检查点从约 130GB 压到约 80GB，塞进 128GB 统一内存的 Ryzen AI Halo 本机跑。关思考的 MMLU-Pro 上，零查表让 AWQ 掉 32.54 个点，U 把缺口缩到 2.12 个点；但编码与并行工具调用要付出代价，U 的编码分数比原表低约 9 个点。FP8 表在 18 组组合里与原表差距不到 2 个点，是省存储又不伤精度的参考线。</p>
+  <div class="links">
+    <a class="cn" href="pages/amd-quark-qwen-ple.html">中文精读 →</a>
+    <a class="en" href="https://rocm.blogs.amd.com/artificial-intelligence/quark-qwen-ple/README.html">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">推理部署</span><span class="tag">n-gram 查表</span><span>收藏于 2026-11-15</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
