@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Qwen3.8-Flash-Next查表瘦身：51GB n-gram表换1.3GB · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Qwen3.8-Flash-Next查表瘦身：51GB n-gram表换1.3GB</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://rocm.blogs.amd.com/artificial-intelligence/quark-qwen-ple/README.html">https://rocm.blogs.amd.com/artificial-intelligence/quark-qwen-ple/README.html</a></div>
+<h1>AMD Quark Qwen PLE：51GB n-gram 查表换 1.3GB，塞进 128GB 本机（中文精读）</h1>
+<ul>
+<li>原文：Beyond Embedding Quantization: Quark UINT4 Qwen3.8-Flash-Next on Ryzen AI Halo，AMD ROCm Blogs，2026-11-13</li>
+<li>原文链接：https://rocm.blogs.amd.com/artificial-intelligence/quark-qwen-ple/README.html</li>
+<li>收藏日期：2026-11-15</li>
+<li>星级：4⭐</li>
+<li>主题：低精度量化、推理部署、n-gram 查表</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Qwen3.8-Flash-Next 的 51GB n-gram 查表换成 1.3GB 校准 per-token 表 U，检查点从约 130GB 压到约 80GB，塞进 128GB 统一内存的 Ryzen AI Halo 本机跑；关思考的 MMLU-Pro 上 U 补回了零查表损失的大部分，但编码与并行工具调用要付出代价。</p>
+<h2>为什么 128GB 本机装不下</h2>
+<ul>
+<li>Qwen3.8-Flash-Next 原版 BF16 检查点约 360GB，其中 n-gram 表约 102GB。Quark 把路由专家的 gate、up、down 投影权重用 AWQ 压到非对称 UINT4（组大小 128），检查点降到约 181GB，表还是 BF16；表再压到 FP8 后约 51GB，检查点一共约 130GB。</li>
+<li>Ryzen AI Halo 是统一内存架构，表挪到 CPU 内存里照样占同一块共享容量。表压小了，KV 缓存与运行时缓冲才有地方。</li>
+</ul>
+<h2>n-gram 查表：token 加上文拼向量</h2>
+<ul>
+<li>n-gram 是一小串连续 token；Engram 是 DeepSeek 给这种“用 token 序列取学习向量”的架构起的名字。Qwen3.8-Flash-Next 把当前 token 与前一个 token（bigram）或前两个 token（trigram）哈希，从一张学习表里选行，拼成查表向量。普通 token 嵌入学的是 token 本身，这条向量依赖 token 的局部上下文。</li>
+<li>这条向量一路进到 Layer 2，在那里经学习投影、门控与一段短因果卷积，变成对模型隐藏表示的贡献。模块放在 Layer 2，表预取能与第一层的计算重叠。Qwen 在 Layer 2 用 bigram 与 trigram 查表；DeepSeek-V4.1-Flash 的 Engram 在两个层用最长 4 的 token 序列；Gemma 4 E2B 与 E4B 则给每个解码层提供 token 专属嵌入。</li>
+</ul>
+<h2>四种选择：原表、FP8、U、零查表</h2>
+<ul>
+<li>原表：BF16 n-gram 查表，依赖上下文的完整查表。</li>
+<li>FP8 表：查表本身不变，只把表压到 FP8（per-tensor FP8 E4M3 加 BF16 scale）。</li>
+<li>per-token 表 U：校准出的 BF16 表（248,320×2,560，1.18 GiB），每个 token 一条固定向量，与前文无关。</li>
+<li>零查表：不分配、不加载 n-gram 表，直接给零向量，测模型没了这路输入信号会怎样，也给更小的替换表做基线。</li>
+<li>FP8 只降低查表精度，U 换掉查表的信息内容，零查表把信号整个移除：压表与换信息是两种不同的干预，代价各不相同。</li>
+</ul>
+<h2>思考模式：查表几乎可以不要</h2>
+<ul>
+<li>思考开到 xhigh 档时，几项总分在移除大表、换成 U 之后仍然接近。MMLU-Pro 上 AWQ 是原表 87.79%、FP8 87.93%、U 86.72%、零查表 85.73%；GPQA-Diamond 是 92.12%、92.42%、91.11%、91.41%；GSM8K 是 97.07%、97.00%、96.38%、95.38%。</li>
+<li>BFCL 自定义总分上 AWQ 是原表 67.50%、FP8 67.31%、U 65.55%、零查表 66.33%；LiveCodeBench 131 题子集是 87.63%、88.09%、88.24%、87.79%。</li>
+<li>18 组已完成的 AWQ 评测与档位组合里，FP8 查表相对原表的均值变化在 −1.53 至 +1.01 个百分点之间，全部配对 95% 置信区间都含零。FP8 可以当作省存储又保精度的参考线，但 5 个种子定不了等价。</li>
+</ul>
+<h2>关掉思考：查表一下变关键</h2>
+<ul>
+<li>关思考的 MMLU-Pro 上，移除查表要付出 RTN 17.43 个百分点、AWQ 32.54 个百分点的代价；U 把缺口缩到 1.61 与 2.12 个点。BF16 也一样会掉：原表 85.75% 变成零查表的 72.47%，U 拉回 84.00%。这种依赖不靠路由专家量化才出现，BF16 模型本身就有。</li>
+<li>AWQ 关思考：原表 85.35%、FP8 85.40%、U 83.23%、零查表 52.81%。FP8 表关思考的 MMLU-Pro 与原表基本持平。把表压精度与移除上下文信息是两种干预，测出来的代价不一样。</li>
+<li>没抽出答案的比例也说明问题：关思考的 RTN MMLU-Pro 上，无可抽取答案的回复从原表的 1.57% 涨到零查表的 19.54%，U 拉回 1.89%。</li>
+</ul>
+<h2>编码与工具调用：U 的代价不在总分里</h2>
+<ul>
+<li>编码给出的答案不一样。关思考的 131 题 LiveCodeBench 子集上，RTN 从原表的 66.26% 掉到 U 的 60.61%，AWQ 从 66.56% 掉到 57.56%，BF16 也从 66.11% 掉到 56.03%。多出来的失败主要是错误输出、执行超时与运行时或代码加载错误，不是没写出代码。</li>
+<li>BFCL 总分也藏着分类级的回归。RTN xhigh 总分用 U 只从 65.71% 变到 65.54%，但 non-live 分类从 78.98% 掉到 62.93%，零查表是 63.85%；AWQ 总分也从 67.50% 掉到 65.55%。其他分类的上涨抵掉了这项回归，加权总分看不出来。</li>
+<li>失败模式也不同：5 次重复里，零查表的 non-live 并行与并行多调用任务中，70–79% 的新增失败是调用太少；U 的这个比例是 28–43%，重复调用与多余的不同调用也占了相当一部分。</li>
+</ul>
+<h2>响应长度也跟着变</h2>
+<ul>
+<li>关思考时，零查表的中位数响应在两项任务上都短得多；U 把 MMLU-Pro 拉回接近原表，编码仍然偏短。xhigh 思考下四种选择的中位数长度接近得多。</li>
+<li>关思考的 MMLU-Pro 中位数生成 token：原表 457、FP8 464、U 385、零查表 95；编码：原表 3,055、FP8 3,078、U 1,331、零查表 1,223。xhigh 下 MMLU-Pro 是 648、647、642、645，编码是 20,282、20,640、21,697、21,344。</li>
+<li>低档与中档思考的 MMLU-Pro 也一样：U 在 RTN 与 AWQ 上都补回了零查表损失的一部分，FP8 查表在两档都接近 AWQ 原表分数。中档（AWQ）：86.25%、86.41%、84.82%、83.15%；低档（AWQ）：85.62%、85.60%、84.18%、83.51%。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>n-gram 查表不是可有可无的附件：关思考时查表撑着答案的完整性，移除查表，AWQ 的 MMLU-Pro 从 85.35% 掉到 52.81%，近两成回复连答案都抽不出来。</li>
+<li>但查表也不必是 51GB 的原表：FP8 表在 18 组组合里与原表差距不到 2 个点，U 用 1.18 GiB 的固定向量补回了关思考的大部分损失。代价在编码与并行工具调用上，U 的编码分数比原表低约 9 个点，non-live 工具调用掉 16 个点。省 50GB 存储之前，先确认工作负载要不要这两项能力。</li>
+<li>部署配置：Ryzen AI Halo gfx1151、vLLM 0.31.1rc1、ROCm 7.2.3，W4A8 后端（moe-backend rdna3_w4a8），eager 执行，prefix caching 与 CPU offload 关闭；评测在 MI355X 上跑，BF16 用 TP=4，RTN 与 AWQ 用 TP=1，5 次重复，种子 1234–1238。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
