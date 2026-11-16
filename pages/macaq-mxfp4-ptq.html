@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MACaQ：逐层独立的 MXFP4 后训练量化 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>MACaQ：逐层独立的 MXFP4 后训练量化</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2611.10649">https://arxiv.org/abs/2611.10649</a></div>
+<h1>MACaQ：在线变换留在层内，MXFP4 量化逐层独立，122B 模型 64 分钟量化完（中文精读）</h1>
+<ul>
+<li>原文：MACaQ: Fast, Model Agnostic Calibrated Quantization for Low-Precision Weights and Activations，Lorenz K. Muller 等，Huawei Computing Systems Lab，arXiv:2611.10649</li>
+<li>原文链接：https://arxiv.org/abs/2611.10649</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：低精度量化 / MXFP4 / PTQ</li>
+</ul>
+<h2>一句话要点</h2>
+<p>MACaQ 把在线变换留在层内，让 MXFP4 的 W4A4 后训练量化逐层独立：122B 的 Qwen3.5-122B-A10B 用 32.5GB 显存、64 分钟量化完，WikiText-2 困惑度 5.14（FP16 是 5.06）；Qwen3-32B batch 1 解码 69.8 tok/s，对 FP16 的 22.8 快 3.06 倍。</p>
+<h2>为什么变换要留在层内</h2>
+<ul>
+<li>低精度量化的老问题：离群值逼着做在线变换（缩放、旋转），但变换一跨层，量化就得整模型联动，没法逐层独立。</li>
+<li>MACaQ 的取舍：变换留在层内，每层自己管自己的缩放与旋转，量化流程按层走，显存与时间都随层数线性增长，不随模型总规模爆炸。</li>
+<li>代价是每层都要为在线变换付开销：Qwen3-32B 上端到端开销 <strong>2.3%</strong>，换来的是逐层独立带来的可扩展性。</li>
+</ul>
+<h2>方法四件套</h2>
+<ul>
+<li>在线缩放：每层在线算缩放因子，压离群值。</li>
+<li>在线微旋转：小角度旋转打散离群方向，比大旋转便宜。</li>
+<li>Hessian 加权指数选择：用 Hessian 信息选每个权重的量化指数，重要的权重给更精细的表示。</li>
+<li>Flip-Refinement：22 步伪代码的精修流程，反复翻转、评估、保留更优的量化选择。</li>
+<li>消融（Llama-3-8B，WikiText-2 困惑度）：RTN <strong>8.28</strong> → 加 Hessian 指数搜索 8.09 → 加微旋转 7.65 → 加在线第二缩放 7.08 → 加 Flip-Refinement <strong>6.87</strong>（512 次翻转，比默认配置的 6.90 还低一点）。</li>
+</ul>
+<h2>量化速度与精度</h2>
+<ul>
+<li>122B 模型：Qwen3.5-122B-A10B，51.2 万校准 token、32 次翻转，<strong>64 分钟</strong>量化完，只用 <strong>32.5GB</strong> GPU 显存，量化后模型 <strong>74GB</strong>。</li>
+<li>精度：WikiText-2 困惑度 <strong>5.14</strong>（FP16 5.06）；Llama-3-8B 上 MACaQ 的 Wiki2 <strong>6.90</strong> / C4 11.01（FP16 6.14 / 9.46），比 DuQuant++ 与 MR-GPTQ 的最好困惑度低，量化时间还少 <strong>11 倍</strong>。</li>
+<li>Llama-3-8B 量化约 <strong>150 秒</strong>（K=128、20 万校准 token）。</li>
+<li>FLUX 图像扩散：MACaQ 的 PSNR <strong>15.04</strong> / SSIM 0.697 / LPIPS 0.218，NVFP4 是 14.85 / 0.676 / 0.235——量化方法不只对语言模型有效。</li>
+</ul>
+<h2>内核与端到端速度</h2>
+<ul>
+<li>内核级：小层开销至多约 <strong>6.4%</strong>，大层低于 <strong>2%</strong>——在线变换的代价随层变大而摊薄。</li>
+<li>端到端：Qwen3-32B batch 1 解码 <strong>69.8 tok/s</strong> 对 FP16 的 22.8（<strong>3.06 倍</strong>）；batch 256 时 5252.8 对 3061.5 tok/s。</li>
+<li>结论：MXFP4 的 W4A4 不是纸面精度，配上在线变换留在层内的设计，解码速度实打实地翻了三倍。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>MACaQ 的核心取舍是「变换留在层内」：付 2.3% 的在线开销，换逐层独立、64 分钟量化 122B 模型。</li>
+<li>四件套里 Flip-Refinement 是最后一块拼图：从 7.08 压到 6.87，说明量化后的精修仍有肉可吃。</li>
+<li>对要把大模型压到 MXFP4 落地的人，这篇给了一个可复现的配方：逐层独立的流程、64 分钟的 122B 实测、3 倍的解码加速。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
