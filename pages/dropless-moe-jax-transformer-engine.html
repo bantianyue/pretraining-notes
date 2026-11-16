@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JAX无丢弃MoE训练：分组GEMM、专家并行，DeepSeek-V3单卡从103提到1068 TFLOPS · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>JAX无丢弃MoE训练：分组GEMM、专家并行，DeepSeek-V3单卡从103提到1068 TFLOPS</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transformer-engine">https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transformer-engine</a></div>
+<h1>JAX 无丢弃 MoE 训练：分组 GEMM、专家并行，DeepSeek-V3 单卡从 103 提到 1068 TFLOPS（中文精读）</h1>
+<ul>
+<li>原文：Accelerating Dropless MoE Training in JAX with NVIDIA Transformer Engine，NVIDIA Technical Blog，2026-09-14（2026-09-23 更新）</li>
+<li>原文链接：https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transformer-engine</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：MoE 架构 / 训练核心流程（分组 GEMM、专家并行、MXFP8 量化）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>JAX 加 Transformer Engine 把 DeepSeek-V3 671B 训练从 103 提到 1068 TFLOPS/GPU，提升 10.4 倍：分组 GEMM 处理不规则专家形状，专家并行整合派发与合并，MXFP8 分组量化压低专家矩阵乘法成本；1024 块 GPU 上扩展效率 97%。</p>
+<h2>核心数字</h2>
+<ul>
+<li>未优化基线：103 TFLOPS/GPU，通信占累计内核时间的 84%（DeepSeek-V3，GB300）</li>
+<li>优化后：1068 TFLOPS/GPU，提升 10.4 倍；端到端吞吐提升约 10 倍</li>
+<li>四档优化的 TFLOPs/GPU/秒：105 → 425 → 730 → 1025；tokens/GPU/秒：418 → 1693 → 2907 → 4082</li>
+<li>多机架扩展：128/256/512/1024 卡，TFLOPs/GPU/秒 1025/1025/1010/990，扩展效率 100%/100%/99%/97%</li>
+<li>从 128 卡扩到 1024 卡，单卡算力只从 1025 降到 990，降幅约 3.4%</li>
+</ul>
+<h2>MoE 训练的瓶颈</h2>
+<ul>
+<li>生产规模的 MoE 训练会冒出稠密模型没有的瓶颈：token 路由、专家派发与收集、all-to-all 通信、不规则专家 GEMM</li>
+<li>路由器是学习到的：训练中路由器逐渐偏好某些专家，没有两个批次的专家负载是相同的；同一个批次里，一个专家可能收到很多 token，另一个只收到很少</li>
+<li>每个专家收到的 token 数不同，拼不出规整的矩形 GEMM，只能得到不规则张量；多数库针对均匀、矩形的张量做了高度优化</li>
+<li>专家并行下，token 必须派发出去，输出必须合并并恢复原始 token 顺序；派发与合并路径不优化，通信就会占主导、GPU 空转</li>
+</ul>
+<h2>无丢弃与容量受限的取舍</h2>
+<ul>
+<li>无丢弃 MoE：每个 token 都会被选中的专家处理，不管负载多不均匀；对模型质量有吸引力，对系统要求很高</li>
+<li>MegaBlocks 把专家计算重构成块稀疏矩阵乘法，让每个专家处理不同数量的 token，既不丢弃也不填充；需要新的块稀疏 GPU 内核、优化的分组 GEMM、派发与合并原语</li>
+<li>容量受限 MoE：每个专家分到固定 token 预算，超出的要么裁掉、要么填充补齐到固定预算；计算规整、硬件友好，但要在模型质量与效率之间直接取舍</li>
+<li>丢掉溢出 token，模型只能在不完整的数据上训练；填充避免丢弃，训练就要白白付出算力与显存</li>
+<li>选了无丢弃路线，训练栈就不能再依赖固定的专家形状；token 数是数据决定的、CPU 上拿不到，内核还要在 CPU 拿不到形状的情况下工作，才能用 CUDA 图、避免重编译</li>
+</ul>
+<h2>三项核心优化</h2>
+<ul>
+<li>组感知的 MXFP8 量化</li>
+<li>专家矩阵乘法上的 MXFP8 分组 GEMM</li>
+<li>派发与合并的优化专家并行操作</li>
+<li>一层跨两块 GPU 的专家并行 MoE 层：路由器给每个 token 分配专家，派发把 token 送到专家所在的 GPU，分组 MLP 在可变长度的组上跑两轮分组 GEMM，合并反向交换、恢复原始 token 顺序</li>
+</ul>
+<h2>优化一：分组 GEMM</h2>
+<ul>
+<li>稠密前馈网络里每个 token 走同一个权重矩阵；MoE 里路由器把 token 不均匀地分给专家，每步每个专家收到的 token 数不同，常规 GEMM 依赖的规整形状被打破</li>
+<li>此前的办法是循环调用 GEMM 内核与批量 GEMM：循环需要把 token 数从设备拷回主机，走在关键路径上，带来设备到主机传输的延迟，还会打断 CUDA 图；批量 GEMM 按最坏情况的 token 容量算，哪怕实际用的 token 更少，也要填充到固定专家计算量，多算很多</li>
+<li>分组 GEMM 用一次内核调用处理全部专家矩阵乘法，每个专家按实际 token 数算；只算有有效 token 的区域，性能因此更高</li>
+<li>Transformer Engine 的 grouped_gemm / ragged_dot 用 cuBLAS 与 cuBLASLt 做后端，直接映射到性能最好的 NVIDIA GEMM 库，即使专家形状不规则也能吃满 Tensor Core</li>
+<li>Blackwell GPU 上这条路还打开了专家矩阵乘法的 MXFP8 块缩放，用的是 Transformer Engine 的分组量化内核</li>
+</ul>
+<h2>优化二：专家并行整合派发与合并</h2>
+<ul>
+<li>派发：token 移动发生的地方：token 重排并跨 GPU 发送，涉及本地重排与多 GPU 通信</li>
+<li>合并：处理过的 token 送回原始 GPU，各专家结果累加</li>
+<li>简单实现里这两个阶段串行跑：一串独立操作，GPU 在步骤之间停顿，数据多次读写内存，通信在计算跑的时候基本空闲，反过来也一样</li>
+<li>Transformer Engine 的专家并行实现把派发与合并整合成一条紧密集成的融合内核路径，动力来自 NCCL EP，一个专门针对专家并行路由产生的不规则、不均衡流量调优的通信后端</li>
+<li>NCCL EP 还有 token 去重机制：一个 token 派发到同一 rank 上的多个专家、或远程 IB 节点上的多个 rank 时，只在网络上走一次，到达节点后再复制，节省网络带宽</li>
+<li>专家并行与分组 GEMM 互补：分组 GEMM 管专家内部发生什么，专家并行管专家周围的一切</li>
+</ul>
+<h2>另外两项优化</h2>
+<ul>
+<li>JAX 主机卸载：中间激活不必整个前向都存在设备上；JAX 提供重物化 API，把激活卸载到主机内存；DeepSeek-V3 训练里为了省显存，把查询与值投影的结果卸载到主机</li>
+<li>XLA 多流集合通信：默认 XLA 在单流上跑通信，能并行执行的集合操作被串行化，有的还暴露在关键路径上；多流集合通信让编译器把独立的集合操作调度到不同的 CUDA 流上并发执行，跨节点 InfiniBand 传输与节点内 NVLink 通信重叠</li>
+<li>延迟隐藏调度器（LHS）分析集合操作的副本组、检查死锁风险，决定哪些集合操作可以安全重叠；内存带宽收益自动产生，不用手动标注</li>
+<li>这项优化把 DeepSeek-V3 训练里暴露在关键路径上的集合操作占比大幅压低</li>
+</ul>
+<h2>上手：复现配置</h2>
+<ul>
+<li>优化随 NVIDIA NGC MaxText 容器发布，Transformer Engine 已经内置；容器用 2026 年 9 月 10 日（ghcr.io/nvidia/jax:maxtext-2026-09-10）或更新的版本</li>
+<li>打开 TE MoEBlock 的六项配置：te_moe_block: true、te_gmm_quantization: "te_mxfp8"、ragged_buffer_factor: 2.0、te_ep_overflow_check_every_n_steps: 20、sparse_matmul: true、prefuse_moe_weights: true</li>
+<li>复现 DeepSeek-V3 671B 的配置：model_name deepseek3-671b、max_target_length 4096、per_device_batch_size 6、gradient_accumulation_steps 1、steps 15、attention cudnn_flash_te；quantization te_fp8_currentscaling；weight_dtype 与 mu_dtype 均为 bfloat16；128 卡配置为总 FSDP=16（ICI 8 × DCN 2）× EP=8，nodes 32</li>
+<li>XLA 标志：all_reduce 组合阈值 33554432 字节、all_gather 6442450944 字节、reduce_scatter 201326592 字节；command_buffer 开 FUSION、CUBLAS、CUDNN、DYNAMIC_SLICE_FUSION；max_unroll_factor 8、memory_limit_slop_factor 99</li>
+<li>环境变量：XLA_PYTHON_CLIENT_MEM_FRACTION 0.88、CUDA_DEVICE_MAX_CONNECTIONS 16、XLA_PJRT_GPU_HOST_MEMORY_PREALLOCATE false、XLA_PJRT_GPU_HOST_MEMORY_LIMIT_GB 180</li>
+<li>先用参考配置，在小 MoE 模型上验证正确性，再扩规模；跟踪步时间、TFLOPS/GPU、MFU、分组 GEMM 延迟、MoE 派发与合并延迟</li>
+</ul>
+<h2>与 4-bit 训练篇的关系</h2>
+<ul>
+<li>4-bit 训练篇（Inkling 2 Small）解决的是数值格式问题：NVFP4 前向、MXFP8 反向、随机舍入、RHT 加 S2F6 通信</li>
+<li>这篇解决的是 MoE 结构问题：不规则形状、派发合并、专家并行；两篇的交集在 MXFP8：这里用 MXFP8 分组量化做专家矩阵乘法，那里用 MXFP8 做反向</li>
+<li>两篇都落在 GB300 NVL72 上，数字可以对照：NVFP4 在 GB300 上 15 PFLOPS、每值 4.5 比特；这里的分组 GEMM 路径在 Blackwell 上打开 MXFP8 块缩放</li>
+<li>下一步计划：NVFP4、与 GEMM 融合的量化、A2A 重叠——正是 4-bit 训练篇已经验证过的方向</li>
+</ul>
+<h2>值得注意的细节</h2>
+<ul>
+<li>图中四档的终值是 1025 TFLOPS/GPU/秒，文章开头的 headline 数字是 1068 TFLOPS/GPU；两处数字来自不同口径，引用时不要混用</li>
+<li>图 5 的源站 caption 写的是 128 到 2048 卡共五档，图里实际只画了 128/256/512/1024 四档；引用扩展数据时以图为准</li>
+<li>复现配置专用于 DeepSeek-V3，其他模型要另外调参；不一定非要用 TE MoEBlock 本身</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
