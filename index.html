@@ -708,6 +708,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理服务</span><span class="tag">KV 缓存</span><span class="tag">并行策略</span><span>收藏于 2026-11-16</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">61</span>《JAX 无丢弃 MoE 训练》分组 GEMM、专家并行，DeepSeek-V3 单卡从 103 提到 1068 TFLOPS</h3>
+  <p>JAX 加 Transformer Engine 把 DeepSeek-V3 671B 训练从 103 提到 1068 TFLOPS/GPU，提升 10.4 倍：分组 GEMM 一次内核调用处理全部专家矩阵乘法、按实际 token 数算，专家并行把派发与合并整合成融合内核路径、NCCL EP 做 token 去重；1024 块 GPU 上扩展效率 97%。</p>
+  <div class="links">
+    <a class="cn" href="pages/dropless-moe-jax-transformer-engine.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.com/blog/accelerating-dropless-moe-training-in-jax-with-nvidia-transformer-engine/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">MoE 架构</span><span class="tag">训练核心流程</span><span>收藏于 2026-11-16</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
