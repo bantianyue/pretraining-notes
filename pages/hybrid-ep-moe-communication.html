@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoE通信优化Hybrid-EP:8个SM跑满NVLink,DeepSeek-V3训练提速14% · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>MoE通信优化Hybrid-EP:8个SM跑满NVLink,DeepSeek-V3训练提速14%</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/optimizing-communication-for-mixture-of-experts-training-with-hybrid-expert-parallel/">https://developer.nvidia.com/blog/optimizing-communication-for-mixture-of-experts-training-with-hybrid-expert-parallel/</a></div>
+<h1>MoE 通信优化 Hybrid-EP：8 个 SM 跑满 NVLink，DeepSeek-V3 训练提速 14%（中文精读）</h1>
+<ul>
+<li>原文：Optimizing Communication for Mixture-of-Experts Training with Hybrid Expert Parallel，NVIDIA Technical Blog，2026-02-02（2026-03-05 更新）</li>
+<li>原文链接：https://developer.nvidia.com/blog/optimizing-communication-for-mixture-of-experts-training-with-hybrid-expert-parallel/</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：MoE 架构 / 训练核心流程（专家并行通信、RDMA-NVLink 混合组网）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Hybrid-EP 是新设计的 MoE 专家并行通信库：RDMA 与 NVLink 混合组网、细粒度分块流式流水线、每 CUDA 块一条独立数据通道；DeepSeek-V3 训练提速约 14%，Qwen 3 235B 的 MXFP8 场景提速约 9.9%。</p>
+<h2>核心数字</h2>
+<ul>
+<li>DeepSeek-V3（256 专家、topk-8）：MXFP8 下 DeepEP 829 TFLOPS/GPU，Hybrid-EP 943 TFLOPS/GPU，提速 1.14 倍（约 14%）</li>
+<li>DeepSeek-V3-FSDP：MXFP8 下 A2A 597 TFLOPS/GPU，Hybrid-EP 645 TFLOPS/GPU，提速 1.08 倍（约 8%）</li>
+<li>Qwen 3 235B：BF16 下 A2A 665 TFLOPS/GPU，Hybrid-EP 698 TFLOPS/GPU，提速 1.05 倍（约 5.5%）；MXFP8 下 A2A 728 TFLOPS/GPU，Hybrid-EP 800 TFLOPS/GPU，提速 1.10 倍（约 9.9%）</li>
+<li>DGX Hopper（8 块 H100）：只用 8 个 SM 就填满 NVLink 带宽</li>
+<li>4 台 DGX Hopper（32 块 GPU）：约 4 个 SM 就接近网卡最大带宽</li>
+<li>Grace Blackwell NVL36（36 块 GPU）：只用 16 个 SM 就填满 NVLink 带宽</li>
+</ul>
+<h2>超大规模 MoE 训练的三个效率挑战</h2>
+<ul>
+<li>通信效率瓶颈：MoE 模型依赖并行专家、频繁 all-to-all 通信；专家越多，EP 通信负担越重；DeepSeek-V3 不优化时通信时间可能占训练总时间一半以上</li>
+<li>负载不均衡：动态路由让热专家收到的 token 比平均多，冷专家利用不足，设备间计算负载不均、算力浪费；专家数与激活专家数继续增加时问题更明显</li>
+<li>框架适配挑战：MoE 模型对并行策略、低精度计算、动态资源调度提出更高更复杂的要求，还要优化以压榨 Blackwell、Quantum InfiniBand、Spectrum-X 以太网等下一代硬件架构的潜力</li>
+</ul>
+<h2>Megatron Core 框架底座</h2>
+<ul>
+<li>多维并行策略：支持张量并行、序列并行、流水线并行、MoE 专家并行等策略，灵活组合、适配多样复杂的训练负载</li>
+<li>资源与效率优化：集成 FP8 混合精度训练、激活值卸载、分布式优化器、细粒度重算，降低 GPU 显存消耗；集成 MLA、Attention、MLP 等高效算子，提供多种融合优化与流水线调度策略，提升计算性能</li>
+<li>MoE 专属适配：完整支持 DeepSeek、Mixtral、Qwen 等主流 MoE 模型，高效、可扩展训练</li>
+</ul>
+<h2>Hybrid-EP 的设计</h2>
+<ul>
+<li>两个核心算子：dispatch 把注意力算子输出的 token 路由到对应的专家，combine 把专家输出的 token 送回注意力算子；还加了路由与信息处理支持，补全 EP 通信</li>
+<li>通信技术：NVLink scale-up 网络上的 TMA 数据通信命令、RDMA 网络的底层 IBGDA 网络技术；RDMA 与 NVLink 混合组网把节点内 NVLink 与节点间 RDMA 结合起来，最大化跨域带宽、提升算法带宽</li>
+<li>流水线：数据切成细粒度块、多级通信数据流水线流式通过，掩盖通信与动态路由的大部分延迟，让 EP 带宽比得上高度优化的标准静态 all-to-all</li>
+<li>省 SM：用更少的 SM 达到峰值通信带宽，留出更多 SM 给计算；低精度原生支持 FP8/BF16 派发算子与 BF16 合并算子</li>
+<li>数据通道：每个 CUDA 块是一条独立数据通道，占一个 SM 跑完整数据流水线；一个 CUDA 块里不同 warp 组处理不同流水线阶段；CUDA 块并行跑、处理不同数据块，块之间不用同步、不用通信</li>
+</ul>
+<h2>派发与合并的数据流水线</h2>
+<ul>
+<li>派发：RDMA warp 组用 IBGDA 把网络流量发到 RDMA 网卡，完成同轨 GPU 之间与不同节点之间的网络通信；G2S warp 组把本 GPU 与同轨其他节点传来的 token 数据读进 SM 内共享内存 FIFO 队列；S2G warp 组把 FIFO 队列里的 token 数据写到本节点所有 GPU 输出缓冲里的对应位置；token 按路由图里的信息路由与传输，避免传不需要的 token 数据</li>
+<li>合并：对 token 做高精度累加操作，目前只在 SM 内的 CUDA 核上做，必须分层累加；多节点时节点内 warp 组先在节点内完成一部分累加，再由 RDMA warp 组把部分累加的 token 发到节点间同轨的 GPU，最后由节点间 warp 组完成全局累加；单节点时节点内的累加工作直接由节点间相关的 warp 组做</li>
+</ul>
+<h2>三档硬件实测</h2>
+<ul>
+<li>测试条件：隐藏维度 8192，数据类型 BF16、只传 token，每 rank 注意力 token 数 4096，每 rank 专家数 2，路由图按均匀分布随机生成，TopK=8，用 Quantum InfiniBand 网络</li>
+<li>DGX Hopper（8 块 H100）：TopK=8 时，派发算法带宽从 4 个 CUDA 块的 177.76 GB/s 升到 16 个块的 368.93 GB/s，合并算法带宽从 191.24 升到 368.87 GB/s</li>
+<li>4 台 DGX Hopper（32 块 GPU）：每台同轨 4 块 H100 各配一块 400 Gbps 的 ConnectX-7 网卡；4 个 CUDA 块时派发算法带宽 119.1 GB/s、合并算法带宽 117.1 GB/s，8 个块时分别到 121.3 与 123.4 GB/s；对应的 NIC 总线带宽从 43.4 与 42.7 GB/s 只涨到 44.2 与 45 GB/s</li>
+<li>Grace Blackwell NVL36：16 个 CUDA 块时派发算法带宽 694.1 GB/s、合并算法带宽 617.62 GB/s；32 个块时分别到 714.66 与 657.72 GB/s</li>
+</ul>
+<h2>PyTorch 落地：缓冲管理与 permute 融合</h2>
+<ul>
+<li>集成：Hybrid-EP 基于模板与 CUDA C 实现，输入输出都是缓冲地址；已进 DeepEP/Hybrid-EP 分支，提供可直接调用的 PyTorch 算子</li>
+<li>缓冲分两类：注册缓冲是专门注册的 GPU 内存，其他 rank 上的内核可以访问，是唯一的全局静态缓冲；普通缓冲是 cudaMalloc 分配的 GPU 内存，可由 PyTorch 分配器管理，通常不是全局唯一的</li>
+<li>预分配：缓冲申请与注册操作耗时，理想情况只在 Python Hybrid-EP 初始化阶段做一次；MoE 模型是动态的，每轮迭代当前 rank 收到的 token 数在变，用最坏情况预分配策略：按上限申请一个大缓冲，让所有 token 都能汇聚到同一个 rank</li>
+<li>去掉一次拷贝：Hybrid-EP 派发输出与合并输入存在注册缓冲里，标准 PyTorch 张量在普通缓冲里，两者之间要多一次设备间拷贝；加 permute 操作把设备间拷贝融进 permute 步骤，专家 MLP 直接消费 Hybrid-EP 输出</li>
+<li>工作流：预处理之后要同步，因为 Torch 需要 GPU 端结果才能定后续张量尺寸，而 Hybrid-EP 在预处理内核里算缓冲大小；主机预先定义足够大的缓冲尺寸，就可以去掉这次同步</li>
+</ul>
+<h2>与 JAX 无丢弃 MoE 训练篇的关系</h2>
+<ul>
+<li>JAX 篇（DeepSeek-V3 从 103 提到 1068 TFLOPS/GPU）解决的是 MoE 结构问题：不规则形状、分组 GEMM、专家并行派发合并、MXFP8 分组量化</li>
+<li>这篇解决的是 MoE 通信问题：派发与合并两个算子本身怎么做、怎么贴近硬件带宽上限、怎么在 PyTorch 里落地</li>
+<li>两篇的交集在专家并行：JAX 篇的 NCCL EP 后端加 token 去重，这篇的 Hybrid-EP 是 Megatron Core 里的另一条专家并行通信实现；两篇的数字可以对照：JAX 篇是端到端训练吞吐（TFLOPS/GPU），这篇是通信带宽（GB/s）加训练吞吐</li>
+<li>下一步计划：NVFP4、与 GEMM 融合的量化、A2A 重叠——与 4-bit 训练篇（Inkling 2 Small）已经验证过的方向一致</li>
+</ul>
+<h2>值得注意的细节</h2>
+<ul>
+<li>源站表 1 里 Qwen 3 235B 的 BF16 Hybrid-EP 一行写的是「BF18」，是笔误：同行 BF16 A2A 是 665、Hybrid-EP 是 698，1.05 倍；结果文字也写 BF16 场景快约 5.5%，698 除以 665 约 1.05，互相印证</li>
+<li>结果文字里「Megatron-FSDP 下混合 EP 仍有约 8% 的性能提升」在源站出现两次，是源站重复，精读只写一次</li>
+<li>数字互相印证：943 除以 829 约 1.14，645 除以 597 约 1.08，698 除以 665 约 1.05，800 除以 728 约 1.10</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
