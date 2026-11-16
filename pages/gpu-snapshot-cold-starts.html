@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU 显存快照把冷启动从分钟级压到秒级 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>GPU 显存快照把冷启动从分钟级压到秒级</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://sahilmahendrakar.com/writings/cold-starts">https://sahilmahendrakar.com/writings/cold-starts</a></div>
+<h1>GPU 显存快照把冷启动从分钟级压到秒级：低流量定制模型缩到零再快速拉起（中文精读）</h1>
+<ul>
+<li>原文：GPU Snapshot Cold Starts，Sahil Mahendrakar，2026-11-13</li>
+<li>原文链接：https://sahilmahendrakar.com/writings/cold-starts</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：推理优化 / KV 缓存 / 成本</li>
+</ul>
+<h2>一句话要点</h2>
+<p>GPU 显存快照把定制模型冷启动从 3–7 分钟压到约 20 秒：把确定性的初始化结果一次性存下来，恢复时直接拷回内存，不再重算；9B 模型在 L4 上单次唤醒 0.01–0.02 美元（全新启动 0.05–0.07 美元），每月 300 次突发约 7 美元。</p>
+<h2>为什么冷启动贵</h2>
+<ul>
+<li>低流量定制模型不能常驻：没人用时占着 GPU 是纯烧钱，缩到零就得接受冷启动。</li>
+<li>冷启动的 3–7 分钟不是模型加载：Python 导入、CUDA 上下文建立、内核编译、CUDA Graph 捕获，这些确定性初始化每次都要重做一遍。</li>
+<li>确定性是关键洞察：同样的模型、同样的环境，初始化结果每次都一样——那就可以只算一次，存下来复用。</li>
+</ul>
+<h2>显存快照存什么</h2>
+<ul>
+<li>快照存的是初始化结果：Python 导入状态、CUDA 上下文、编译好的内核、捕获好的 CUDA Graph。</li>
+<li>恢复时直接把快照拷回内存，不再重算初始化，冷启动从 3–7 分钟压到约 20 秒。</li>
+<li>快照故意不含权重与 KV 缓存：这两样是运行时的可变状态，放进快照会把快照做大、恢复变慢。</li>
+</ul>
+<h2>vLLM 休眠的取舍</h2>
+<ul>
+<li>恢复前先让 vLLM 休眠：释放权重与 KV 缓存，但保留地址映射。</li>
+<li>地址保留是关键：CUDA Graph 里记的是显存地址，地址不变，捕获好的 Graph 恢复后仍然有效，不用重新捕获。</li>
+<li>代价是恢复后要重新加载权重：但权重加载是纯带宽活，比重新初始化快得多，整体仍在 20 秒量级。</li>
+</ul>
+<h2>成本账</h2>
+<ul>
+<li>9B 模型在 L4 上：单次唤醒 <strong>0.01–0.02 美元</strong>，全新启动 <strong>0.05–0.07 美元</strong>。</li>
+<li>每月 300 次突发约 <strong>7 美元</strong>：低流量定制模型缩到零再拉起，成本不再是拦路虎。</li>
+<li>结论：冷启动从分钟级压到秒级后，「不用时缩到零」变成可行的默认策略，而不是只有高流量模型才配享有的奢侈品。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>冷启动的瓶颈不在模型本身，在每次重做的确定性初始化；快照的思路是把「算过一次的东西」存下来。</li>
+<li>快照不含权重与 KV 缓存、vLLM 休眠保留地址，这两个取舍是整套机制成立的前提。</li>
+<li>对低流量定制模型，这套打法把服务成本从「常驻烧钱」降到「每次唤醒几分钱」，缩到零才真正可行。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
