@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wide-EP宽专家并行:NVL72上EP32比EP8单卡吞吐高1.8倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Wide-EP宽专家并行:NVL72上EP32比EP8单卡吞吐高1.8倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/scaling-large-moe-models-with-wide-expert-parallelism-on-nvl72-rack-scale-systems">https://developer.nvidia.com/blog/scaling-large-moe-models-with-wide-expert-parallelism-on-nvl72-rack-scale-systems</a></div>
+<h1>Wide-EP 宽专家并行：NVL72 上 EP32 比 EP8 单卡吞吐高 1.8 倍（中文精读）</h1>
+<ul>
+<li>原文：Scaling Large MoE Models with Wide Expert Parallelism on NVL72 Rack Scale Systems，NVIDIA Technical Blog，2025-10-20（2026-01-08 更新）</li>
+<li>原文链接：https://developer.nvidia.com/blog/scaling-large-moe-models-with-wide-expert-parallelism-on-nvl72-rack-scale-systems</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：MoE 架构 / 训练核心流程（专家并行推理、NVL72 机架规模系统）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Wide-EP 把 DeepSeek-R1 的 256 专家分到 64 块 GPU 上：每层每块 GPU 4 个专家、每块 GPU 共 232 个专家；EP32 比 EP8 每 GPU 吞吐最高高出 1.8 倍，NVL72 的 130 TB/s 相干 NVLink 域抵消通信开销。</p>
+<h2>核心数字</h2>
+<ul>
+<li>DeepSeek-R1：256 专家、6710 亿参数</li>
+<li>大规模 EP 的定义：专家分到 8 块或更多 GPU 上</li>
+<li>DeepSeek-R1 在 EP=64 下：每层每块 GPU 4 个专家，每块 GPU 共 232 个专家（58 层 × 4）</li>
+<li>NVL72：130 TB/s 聚合 NVLink 带宽，72 块 GPU 的 NVLink 域</li>
+<li>EP32 对比 EP8：每 GPU 输出 token 吞吐最高高出 1.8 倍（每用户 100 token/秒，NVFP4 ISL/OSL 8K/1K）</li>
+<li>两种配置都用解耦服务与多 token 预测（MTP）</li>
+</ul>
+<h2>大规模 EP 解决什么问题</h2>
+<ul>
+<li>MoE 推理只激活一小部分专家，大幅降低每个 token 的计算需求；代价是每个 token、每层都要动态加载被激活专家的权重；高吞吐、低延迟场景下，权重加载开销很快成为 MoE GroupGEMM 的主要瓶颈</li>
+<li>MoE GroupGEMM 把每个专家的 token 分组成矩阵、一次大计算；算术强度提升了，但乘法之前要把每个专家的权重加载进片上内存与寄存器</li>
+<li>大规模 EP 引入更多 GPU、减少每块 GPU 持有的专家数：权重加载压力更小、GroupGEMM 内核更容易复用权重（算术强度更高）、内核内计算与显存平衡更好</li>
+</ul>
+<h2>系统设计与架构</h2>
+<ul>
+<li>互连带宽与拓扑是基础，让激活与权重在设备间顺畅流动；优化的软件与内核用通信原语、带宽感知调度与负载均衡管理专家间流量</li>
+<li>NVLink 通信：推理的解码阶段，分布式专家必须交换信息、把多块 GPU 的输出汇总；把 DeepSeek-R1 的 256 专家分到 64 块 GPU、每个 token 激活 8 个专家时，通信成本取决于哪一层激活了哪些专家、以及权重放在哪里；分布式输出要汇总、token 要重排，才能交给下一个 Transformer 块或最终 softmax 层；没有 NVL72 的 130 TB/s 聚合带宽，这种通信模式的复杂性与开销会让大规模 EP 不切实际</li>
+<li>NCCL 内核：MoE 每个 Transformer 块在专家层之后都要做每个 token 的派发与聚合，其中的 all-to-all 操作很快会让本就受显存带宽制约的解码阶段饱和；定制的高性能 NCCL 内核能处理大规模 EP 部署里非静态的数据尺寸，可以直接从 GPU 内存接受通信尺寸，并利用 NVL72 的聚合内存；定制内核还解决了多机架规模部署场景下的 CUDA 图兼容问题</li>
+<li>EPLB 负载均衡：按资源可用性分配工作，最大化利用率又不让任何一部分过载；GB200 NVL72 机架跑 Wide-EP DeepSeek-R1、EP=64 时，每层每块 GPU 分 4 个专家，每块 GPU 共 232 个专家；热专家全挤在同一块 GPU、冷专家所在的 GPU 空转时，EPLB 用策略把热专家与冷专家重新搭配分布；权重更新用容器化设计让专家在容器分配里进进出出、不破坏 CUDA 图，以非阻塞方式调度在两次前向之间</li>
+<li>EPLB 两种模式：静态 EPLB 按历史数据模式预先算好的专家到 GPU 映射，优化专家分配；在线 EPLB 运行时动态重新分布专家，实时适应不断变化的负载模式；静态比不用 EPLB 有不错的基线改进，在线在实时生产系统里有最高的优化潜力</li>
+</ul>
+<h2>Dynamo 与 Wide-EP 的分工</h2>
+<ul>
+<li>Dynamo：解耦推理的编排层，跨 GPU 池编排 prefill 与 decode 阶段；SLA 感知自动扩缩容与动态速率匹配（TTFT 与 ITL）；通过 Dynamo Planner 实时响应 ISL/OSL 波动；通过 Kubernetes 加 Planner 逻辑跨解耦 GPU 域扩展</li>
+<li>Wide-EP：专家并行解码的执行引擎，每块 GPU 分少量专家，优化每个 token 的显存与计算利用；高效专家调度，最大化批量、最小化延迟；负载均衡专家分配，优化计算利用；利用高带宽域（如 NVL72）做高效专家通信</li>
+<li>两者合起来是 TensorRT-LLM 大规模 MoE 推理的软件支柱：Dynamo 管编排、Wide-EP 管执行</li>
+</ul>
+<h2>性能与负载经济学</h2>
+<ul>
+<li>关键因素：模型规模与专家数量（专家少的较小模型从 Wide-EP 获益少，通信开销可能超过权重加载减少与分布式计算的好处）；系统延迟与并发目标（吞吐受延迟制约时大规模 EP 最有效，能在相同延迟下获得更高的每 GPU 吞吐）；硬件能力（聚合显存带宽、GPU 间带宽与可达算力，决定系统能否达到最优并行度）</li>
+<li>DeepSeek-R1 是大规模 EP 的强候选：TensorRT-LLM 的 Wide-EP 在 GB200 NVL72 机架规模系统上给出效率与吞吐的最佳平衡</li>
+<li>还有机会用多 token 预测（MTP）的推测解码提升每用户 token 吞吐，这项功能已经与 Wide-EP 兼容</li>
+</ul>
+<h2>与 Hybrid-EP、JAX 无丢弃 MoE 训练两篇的关系</h2>
+<ul>
+<li>JAX 篇（DeepSeek-V3 从 103 提到 1068 TFLOPS/GPU）讲训练：不规则形状、分组 GEMM、专家并行派发合并、MXFP8 分组量化</li>
+<li>Hybrid-EP 篇（DeepSeek-V3 训练提速 14%）讲训练通信：派发与合并两个算子本身怎么做、怎么贴近硬件带宽上限、怎么在 PyTorch（Megatron Core）里落地</li>
+<li>这篇讲推理：专家并行在推理侧怎么扩展、NVL72 机架规模系统怎么扛通信、EPLB 怎么做负载均衡、Dynamo 与 Wide-EP 怎么分工</li>
+<li>三篇合起来是 MoE 专家并行的一条线：训练结构（JAX）→ 训练通信（Hybrid-EP）→ 推理扩展（Wide-EP）；数字可以对照：训练侧是 TFLOPS/GPU，推理侧是每 GPU 输出 token 吞吐与 1.8 倍</li>
+</ul>
+<h2>值得注意的细节</h2>
+<ul>
+<li>图 3 的 caption 写「每层只激活 4 个」，正文 NVLink 一节写「每个 token 激活 8 个专家」：两者不矛盾——DeepSeek-R1 每个 token 激活 8 个专家、分布在多块 GPU 上，每块 GPU 每层最多持有 4 个专家，所以单卡每层最多激活 4 个</li>
+<li>1.8 倍的测试条件：NVFP4、ISL/OSL 8K/1K、每用户 100 token/秒，两种配置都用解耦服务与多 token 预测（MTP）</li>
+<li>图 1、图 3、图 4 是动图（69/139/45 帧），公众号稿里保动画；封面用图 1 最后一帧（69 帧末帧，两侧都已填满），白底两侧留白适配 2.35:1，零拉伸</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
