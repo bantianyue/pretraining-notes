@@ -658,6 +658,56 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">投机解码</span><span class="tag">推理优化</span><span>收藏于 2026-11-15</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">56</span>《GPU 显存快照》冷启动从 3–7 分钟压到 20 秒，9B 模型 L4 上单次唤醒 0.01–0.02 美元</h3>
+  <p>快照存的是确定性初始化结果：Python 导入、CUDA 上下文、编译好的内核、捕获好的 CUDA Graph，恢复时直接拷回内存。快照故意不含权重与 KV 缓存；vLLM 休眠释放权重与 KV 缓存但保留地址，CUDA Graph 保持有效。每月 300 次突发约 7 美元，低流量定制模型缩到零再拉起变得可行。</p>
+  <div class="links">
+    <a class="cn" href="pages/gpu-snapshot-cold-starts.html">中文精读 →</a>
+    <a class="en" href="https://sahilmahendrakar.com/writings/cold-starts">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">KV 缓存</span><span>收藏于 2026-11-16</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">57</span>《KV 量化三法移植》PearlQuant 重建 672/672 全过，HyperQuant 84/86，UltraQuant 8,228 次零失败</h3>
+  <p>三套 KV 量化 kernel 移植到 CUDA、HIP、SYCL：一份 CPU 参考加共享测试向量，PearlQuant 从博客文字重建、4 小时跑通 672/672 项检查（最坏相对误差 1.1e-6），HyperQuant 在 6 个后端上都是 84/86（失败的 2 项是上游 bug），UltraQuant 的 CUDA 移植在 5 张 NVIDIA 卡上跑了 8,228 次启动零失败。速度要交税：编解码比 FP8 路径在 MI300X 上慢 1.48 倍、H100 上慢 1.74 倍。</p>
+  <div class="links">
+    <a class="cn" href="pages/kv-quant-kernels-porting.html">中文精读 →</a>
+    <a class="en" href="https://magnihq.com/blog/one-for-amd-one-for-nvidia-one-had-no-code">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">KV 缓存</span><span class="tag">GPU kernel</span><span>收藏于 2026-11-16</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">58</span>《MACaQ》在线变换留在层内，MXFP4 量化 122B 模型 64 分钟，解码快 3.06 倍</h3>
+  <p>在线变换留在层内，MXFP4 的 W4A4 后训练量化逐层独立：122B 的 Qwen3.5-122B-A10B 用 32.5GB 显存、64 分钟量化完，WikiText-2 困惑度 5.14（FP16 是 5.06）；Qwen3-32B batch 1 解码 69.8 tok/s，对 FP16 的 22.8 快 3.06 倍。消融：RTN 8.28 → Flip-Refinement 6.87；比 DuQuant++ 与 MR-GPTQ 最好困惑度低、量化时间少 11 倍。</p>
+  <div class="links">
+    <a class="cn" href="pages/macaq-mxfp4-ptq.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/abs/2611.10649">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">MXFP4</span><span>收藏于 2026-11-16</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">59</span>《GC-MoE 上 SM120》消费级 Blackwell 跑专家并行，FP8×FP4 MMA 解码快 1.52 倍</h3>
+  <p>三角色核加 Green Context 让 token 分发与计算重叠，Warp 级 FP8×FP4 块缩放 MMA 做专家计算：8× RTX PRO 5000（SM120）上路由解码 18/18 个点全部快于两个基线，平均比 CuTe DSL 快 1.522 倍、比 Cake 快 1.387 倍；精度 94/94 个 case、752/752 次 per-rank 检查全过，与 Cake 余弦 0.99999976。</p>
+  <div class="links">
+    <a class="cn" href="pages/gc-moe-sm120.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/abs/2611.16219">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">MoE</span><span class="tag">GPU kernel</span><span>收藏于 2026-11-16</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">60</span>《GLM-5.3-Flash 上 MI300X》KV 容量决定并行策略，DP8+EP8 长会话快 2.04 倍</h3>
+  <p>TP8 把每条请求的 KV 复制 8 份，DP8+EP8 每条请求只存一份：KV 池从 9,841,634 token 涨到 56,564,848（5.75 倍），长会话（96k/32k）上限从 76 条涨到 441 条。低并发 TP8 快约 1.6 倍，高并发 DP8+EP8 快 2.04 倍；FP8 KV 在上限之上再涨 20–40%。</p>
+  <div class="links">
+    <a class="cn" href="pages/rocm-glm53-mi300x.html">中文精读 →</a>
+    <a class="en" href="https://rocm.blogs.amd.com/artificial-intelligence/glm53flash-mi300x-vllm/README.html">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理服务</span><span class="tag">KV 缓存</span><span class="tag">并行策略</span><span>收藏于 2026-11-16</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
