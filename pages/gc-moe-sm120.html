@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GC-MoE 上 SM120：消费级 Blackwell 跑专家并行 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>GC-MoE 上 SM120：消费级 Blackwell 跑专家并行</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2611.16219">https://arxiv.org/abs/2611.16219</a></div>
+<h1>GC-MoE 上 SM120：消费级 Blackwell 跑专家并行，Warp 级 FP8×FP4 块缩放 MMA，解码快 1.52 倍（中文精读）</h1>
+<ul>
+<li>原文：GC-MoE on SM120: Overlapping Expert-Parallel Token Dispatch with Warp-Level FP8xFP4 Block-Scaled MMA on Consumer Blackwell，arXiv:2611.16219</li>
+<li>原文链接：https://arxiv.org/abs/2611.16219</li>
+<li>收藏日期：2026-11-16</li>
+<li>星级：4⭐</li>
+<li>主题：低精度量化 / MoE / GPU kernel / 推理优化</li>
+</ul>
+<h2>一句话要点</h2>
+<p>GC-MoE 在消费级 Blackwell（SM120）上做专家并行：三角色核加 Green Context 让 token 分发与计算重叠，Warp 级 FP8×FP4 块缩放 MMA 做专家计算，路由解码 18/18 个点全部快于两个基线，平均比 CuTe DSL 快 1.522 倍、比 Cake 快 1.387 倍。</p>
+<h2>为什么消费级 Blackwell 难做 MoE</h2>
+<ul>
+<li>消费级卡没有数据中心卡的片间带宽与大显存：专家并行里 token 分发很容易盖过计算，变成通信 bound。</li>
+<li>传统做法是先分发、再计算，串行等；GC-MoE 的思路是让分发与计算重叠，分发走一路、计算走另一路。</li>
+<li>硬件是 8× RTX PRO 5000 72GB（SM120），PCIe 互联——在这种配置上跑出加速，才说明方法对消费级硬件是真的。</li>
+</ul>
+<h2>三角色核与 Green Context</h2>
+<ul>
+<li>三个角色核分工：role 1（256 线程，dispatch，6 个 SM）负责分发，role 2（192 线程，compute）与 role 3（384/256 线程，compute）负责计算。</li>
+<li>Green Context 是分发上下文的载体：6 个 SM 专门做分发上下文，不与计算抢 SM。</li>
+<li>双返回路径：结果有两条回路可选，分发与返回都不堵计算。</li>
+</ul>
+<h2>FP8×FP4 块缩放 MMA</h2>
+<ul>
+<li>专家权重用 FP4、激活用 FP8，Warp 级块缩放 MMA：QMMA m16n8k32，M=64，K=128，每 lane 4 个缩放字节。</li>
+<li>两条 FP4 操作数路径：Swap-AB 主循环加自适应片几何，按路由专家数 r 选 tile_n 档位（32/48/80/96），档外回落到 16 或 64；紧凑权重只在 48/80/96 档开。</li>
+<li>流式专家粒度分发：按专家粒度流式分发，不是等一批 token 齐了再动；计算角色内融合共享专家，省一次往返。</li>
+<li>全宽 BF16 返回加常驻中继复制器：返回路径保持 BF16 全宽，精度不掉，中继复制器常驻、不用反复建。</li>
+</ul>
+<h2>评测</h2>
+<ul>
+<li>模型：GLM5.2（H=6144，I=2048，256 专家，top-k 8）与 DSV4.1-Flash（H=5120，I=2304，384 专家，top-k 6）。</li>
+<li>路由解码：18/18 个点全部快于两个基线，平均 <strong>1.522×</strong> over CuTe DSL（延迟降 33.34%）、<strong>1.387×</strong> over Cake（降 26.84%）。</li>
+<li>融合共享专家：平均 <strong>1.388×</strong> over Cake（降 26.92%）。</li>
+<li>带宽：B=128 时返回负载 <strong>24.1 GB/s/GPU</strong>（CuTe DSL 12.0、Cake 18.8）；B=256 时三家均近 30 GB/s；HBM 最佳 <strong>1145 GB/s/GPU</strong>（B=32 GLM5.2，1.42× Cake、1.45× DSL）。</li>
+<li>细节：B=256 GLM5.2 点 GC 1082.38 μs 对 Cake 1100.85 μs（1.017×），HBM 593 对 583 GB/s——大 batch 下优势收窄，说明分发重叠的收益在中小 batch 更明显。</li>
+</ul>
+<h2>精度</h2>
+<ul>
+<li><strong>94/94</strong> 个 case、<strong>752/752</strong> 次 per-rank 检查全部通过。</li>
+<li>路由版与 BF16 参考余弦 <strong>0.97610 / 0.97699</strong>，与 Cake 余弦 <strong>0.99999976</strong>、最大绝对差 0.000000——FP8×FP4 的数值与全精度基线几乎一致。</li>
+<li>代码底座：GC MoE 0.6.0（commit 141d287）、FlashInfer 0.7.3、ptxas 13.2.78。</li>
+</ul>
+<h2>结语</h2>
+<ul>
+<li>消费级 Blackwell 跑 MoE 的关键不是堆算力，是让分发与计算重叠：三角色核分工、Green Context 隔离、双返回路径。</li>
+<li>FP8×FP4 块缩放 MMA 把专家计算压到 4 比特还不掉精度，94/94 的检查是通过的硬证据。</li>
+<li>18/18 全胜、平均 1.52 倍——在 PCIe 互联的消费级卡上，这个数字说明专家并行不一定非要数据中心硬件。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
