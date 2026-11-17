@@ -768,6 +768,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">提示词工程</span><span>收藏于 2026-11-17</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">67</span>《流水线并行做 Agent prefill》每批只同步一次，单卡请求数比 DEP2 高 23%</h3>
+  <p>Agent 时代的 prefill 改写了并行方式的取舍：首 token 时延目标放宽到数秒后，同步最少的流水线并行反而最能撑请求；两块 B300 上用 vLLM 跑 MiniMax-M3.1-Flash，2 秒 p50 首 token 时延目标下 PP2 每块 GPU 可持续的请求数比 DEP2 高 23%、比 TP2 高 17%，饱和时与 DEP2 只差 1% 以内；TP2 每 token 34.0 微秒 GPU 时间、PP2 只 27.2 微秒，通信占 TP2 时间的 18%；拷贝引擎交接加异步调度把 p50 时延压低 8.5%~16%，饱和速率基本不变。</p>
+  <div class="links">
+    <a class="cn" href="pages/pipeline-parallelism-agentic-prefill.html">中文精读 →</a>
+    <a class="en" href="https://inferact.ai/news/pipeline-parallelism-in-agentic-era">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">vLLM</span><span>收藏于 2026-11-17</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
