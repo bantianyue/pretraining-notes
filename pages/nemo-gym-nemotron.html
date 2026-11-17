@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实验记录建成NeMo Gym可验证奖励，蒸馏热启动再GRPO：Nemotron领域后训练配方 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>实验记录建成NeMo Gym可验证奖励，蒸馏热启动再GRPO：Nemotron领域后训练配方</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/post-training-nvidia-nemotron-to-increase-accuracy-in-your-scientific-domain/">https://developer.nvidia.com/blog/post-training-nvidia-nemotron-to-increase-accuracy-in-your-scientific-domain/</a></div>
+<h1>NeMo Gym 可验证奖励：Nemotron 领域后训练配方（中文精读）</h1>
+<ul>
+<li>原文：Post-Training NVIDIA Nemotron to Increase Accuracy in Your Scientific Domain，NVIDIA Technical Blog</li>
+<li>原文链接：https://developer.nvidia.com/blog/post-training-nvidia-nemotron-to-increase-accuracy-in-your-scientific-domain/</li>
+<li>收藏日期：2026-11-17</li>
+<li>星级：4⭐</li>
+<li>主题：后训练、RLVR、GRPO、蒸馏、科学智能体、NeMo</li>
+</ul>
+<h2>一句话要点</h2>
+<p>配方分三步：实验记录改写成 NeMo Gym 可验证奖励（RLVR）环境，模型用工具调用提交答案、验证器自动打分；教师模型蒸馏高质量推理轨迹做 SFT 热启动；再用 NeMo RL 做 GRPO 加 LoRA 后训练。药物代谢预测环境、16384 token 输出预算下，SFT 把准确率提升 12%，RL 后训练再提升 17%；后训练后平均 Tanimoto 相似度从 0.69 提到 0.90。</p>
+<h2>核心数字</h2>
+<ul>
+<li>药物代谢预测：SFT 提升 12%，RL 后训练再提升 17%</li>
+<li>蒸馏：从 1934 条提示词筛出 1123 条高质量推理轨迹，Tanimoto 阈值 ≥ 0.7</li>
+<li>后训练后平均 Tanimoto 相似度：0.69 → 0.90</li>
+<li>输出预算：16384 token</li>
+<li>配方模型：Nemotron 3.5 Super VL，开放、可定制的科学工作流多模态模型；基准数据集 NVIDIA Nemotron Litmus-Bench V2.0，开源化学推理数据集与基准</li>
+</ul>
+<h2>科学智能体需要可验证的奖励</h2>
+<ul>
+<li>智能体 AI 正在重塑科学研究与创新：研究者用自然语言表达复杂的科学假设，让自主智能体独立规划任务、执行模拟、评估结果、多轮自我纠正；科学智能体接手的流程越来越长、越来越复杂，也越来越可视化</li>
+<li>准确率与推理效率在每一步都很重要：没有验证，误差会在整个流程里累积；延迟与算力成本会随持续运行成倍增长</li>
+<li>NVIDIA Nemotron for Science 是一组模型、数据集、工具与配方，面向加速智能体科学工作负载；Nemotron 开箱就有科学基准的前沿准确率，科学代码的求解时间也是最快的</li>
+<li>配方讲怎么给科学用例做 Nemotron 3.5 Super VL 后训练：从一份原始实验数据集出发，建一个自定义强化学习（RL）环境（用 NVIDIA NeMo Gym），应用 RL，再用分子相似度打分量改进；NeMo Gym 提供环境基础设施，NVIDIA NeMo RL 提供后训练框架</li>
+<li>配方先讲直接 RL，再讲一个可选蒸馏步骤：教师模型能提供有用示例时，在 RL 之前用蒸馏做热启动</li>
+</ul>
+<h2>从实验记录建起强化学习环境</h2>
+<ul>
+<li>起点是一份现有实验记录的 CSV 文件：序列、SMILES 字符串（简化分子线性输入规范）、反应条件，以及与实测性质或结果配对的其他元数据；分子结构用 SMILES 字符串表示，一种描述分子原子与化学键的文本记法</li>
+<li>这些输入输出对被改写成问答或 user/assistant 提示词对，实验标准答案做验证器，给模型回答打分；这样就构成一个基础的可验证奖励强化学习（RLVR）环境，不需要人工偏好标注：奖励信号直接来自数据</li>
+<li>奖励信号的保真度可以按任务调：简单的序列相似度函数可以做轻量验证器，更复杂的工具也可以接进环境的打分层：化学信息学库、分子模拟器，甚至一个实时自主实验室，都可以作为一次工具调用；工具越丰富，模型越精确地被推向化学或生物学上有意义的输出</li>
+<li>药物代谢的例子里，模型收到母体分子与酶，提交一个预测代谢物；验证器比较预测与参考分子的指纹，分子指纹是结构特征的数值表示，用 Tanimoto 相似度打分；Tanimoto 相似度量两组集合或二进制向量的重叠程度：交集大小除以并集大小；这里用的位指纹分数在 0 到 1 之间，越高表示指纹越相似</li>
+<li>配方用药物代谢预测做实例：给定母体化合物（起始分子）与转化酶，模型预测生成的代谢物；例子用 MetxBioDB 的记录，一个经实验确认的生物转化反应综合数据库</li>
+</ul>
+<h2>直接 RL 后训练与蒸馏热启动</h2>
+<ul>
+<li>直接 RL 后训练：NeMo Gym 环境加 NeMo RL 框架，GRPO 加 LoRA 直接训；模型用工具调用提交答案，验证器自动打分</li>
+<li>蒸馏给 RL 做热启动：教师模型蒸馏高质量推理轨迹做 SFT；从 1934 条提示词筛出 1123 条高质量推理轨迹（Tanimoto 阈值 ≥ 0.7），蒸馏流水线先 SFT 再进 GRPO</li>
+<li>MetxBioDB 环境示例：CYP1A2 N-去甲基化；上手代码包括注册 NeMo Gym 环境、启动 GRPO 训练、GRPO 策略配置、蒸馏流水线、启动 SFT 训练、SFT 训练器配置</li>
+<li>MoE 模型上 vLLM rollout 引擎与 Megatron 训练引擎数值不一致时，用 importance sampling 校正保训练推理一致性</li>
+</ul>
+<h2>先定奖励，再扩工作流</h2>
+<ul>
+<li>奖励设计是核心：奖励必须量想要的科学结果；奖励信号直接来自实验数据，不需要人工偏好标注</li>
+<li>教师蒸馏是可选热启动：教师模型能提供有用示例时才用，蒸馏数据质量由 Tanimoto 阈值把关（≥ 0.7）</li>
+<li>配方可迁移：同一套"实验记录 → RLVR 环境 → SFT 热启动 → GRPO"流程可以换到其他科学领域，验证器换成该领域的工具（化学信息学库、分子模拟器、自主实验室）即可</li>
+<li>值得注意的细节：后训练后平均 Tanimoto 相似度从 0.69 提到 0.90，说明模型预测的代谢物在结构上更接近实验确认的参考分子；SFT 与 RL 的提升是叠加的（+12% 再 +17%），不是互相替代</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
