@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>按变化率分层排提示词：让KV前缀缓存少算90% prefill · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>按变化率分层排提示词：让KV前缀缓存少算90% prefill</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://kumarpratik.com/blog/design-llm-prompts-for-kv-cache-reuse">https://kumarpratik.com/blog/design-llm-prompts-for-kv-cache-reuse</a></div>
+<h1>KV 前缀缓存：提示词按变化率分层，让复用从 2 万 token 开始（中文精读）</h1>
+<ul>
+<li>原文：Design Your LLM Prompts for KV Cache Reuse: Prompt Architecture Is Infrastructure Architecture，Kumar Pratik，2026-09-13</li>
+<li>原文链接：https://kumarpratik.com/blog/design-llm-prompts-for-kv-cache-reuse</li>
+<li>收藏日期：2026-11-17</li>
+<li>星级：4⭐</li>
+<li>主题：KV 缓存、推理优化、提示词工程、vLLM、前缀缓存</li>
+</ul>
+<h2>一句话要点</h2>
+<p>提示词结构就是基础设施结构：按变化率给提示词分层，变化最慢的内容放最前、每个请求都不同的内容放最后；分层边界就是缓存边界，vLLM 按固定大小的 token 块做哈希，相同前缀的 KV 块直接复用。一个时间戳放错位置能让 2 万个稳定 token 的复用全部作废，位置挪对，同样一段提示词的 prefill 工作量大约只剩十分之一。</p>
+<h2>核心数字</h2>
+<ul>
+<li>Digital Twin 需要 3 万到 6 万 token 上下文，聊天机器人大约 2 千</li>
+<li>共享 2 万 token 前缀的两个请求：prefill 从 3 万与 3.2 万 token 降到 1 万与 1.2 万</li>
+<li>时间戳放进第 1 块：2.2 万 token 的 prefill 全作废；挪到边界之后：只剩约 2 千</li>
+<li>按 2.3 万稳定前缀、约 1.2 万动态上下文算：约 66% 的 prefill 可以省掉</li>
+<li>一万个 Digital Twin 时，每天大约 115 亿个提示词 token 与几分钟前 GPU 算过的东西逐字节相同（每个 twin 每天 50 个请求）</li>
+<li>vLLM 调度示例：--max-model-len 262144 --max-num-batched-tokens 8192 --enable-prefix-caching；值得基准测试的预算范围 4K / 8K / 16K / 32K</li>
+<li>上下文窗口：32K、64K、128K、256K；如果前 2.5 万 token 在几千个请求之间共享，那它其实不是 5 万 token 的工作，是 2.5 万 token 的工作加一次查找</li>
+</ul>
+<h2>KV 缓存 60 秒</h2>
+<ul>
+<li>Transformer 推理时，模型要为处理的每个 token 计算注意力键与值；每一步生成都把整个序列重算一遍，浪费大到无法接受，所以推理引擎把它们存在 GPU 显存里，这就是 KV 缓存</li>
+<li>Prefill 一次填满 KV 缓存，decode 每步读缓存、追加一个新 K/V；Prefill 受计算约束，随提示词长度扩展；Decode 受显存约束，随缓存大小扩展；这个分工就是全部关键</li>
+<li>前缀缓存：vLLM 这类引擎把提示词按固定大小的 token 块做哈希，已经算过的相同前缀 KV 块直接复用；共享的 2 万 token 只算一次，之后查表</li>
+</ul>
+<h2>按稳定到动态给提示词排序</h2>
+<ul>
+<li>按变化率给提示词排序，最慢的放最前面；规则只有一行：变化最慢的内容放最前，每个请求独有的内容放最后</li>
+<li>这不是整洁癖：两半之间的边界就是缓存边界；边界往下推，复用就多；边界往上推，prefill 就多</li>
+<li>Digital Twin 的上下文变化速度并不一样：有的几乎冻结，有的每周变，有的每次按键都变；把它们当成一团没有差别的整体，就等于把差别扔掉，而差别正是缓存键的依据</li>
+</ul>
+<h2>一个时间戳能毁掉 2 万 token 的复用</h2>
+<ul>
+<li>最常见的错误看起来完全无害：提示词开头放"Current time: 10:21:32"加请求 ID，5 秒后同一段提示词变成"Current time: 10:21:37"加另一个请求 ID；人读起来这是同一段提示词，对按块哈希的缓存来说，它们什么都不共享</li>
+<li>时间戳放在第 1 块，2 万个稳定 token 全作废；放在稳定层之后，只花约 2 千 token 的 prefill；同样的 token，同样的语义，prefill 工作量大约差 10 倍</li>
+</ul>
+<h2>前缀缓存不是任意分块缓存</h2>
+<ul>
+<li>引擎按固定大小的块给提示词做哈希，每个块的哈希都链在前一个块上：hash(blockₙ) = f( hash(blockₙ₋₁), tokens(blockₙ) )</li>
+<li>一个块的哈希取决于它前面的一切；两个提示词中间完全相同的文本，只要前面的内容有差别，哈希就不一样；块哈希是链式的，一个早期差别会让后面每一个相同的块都够不着</li>
+<li>没有部分得分，没有重新对齐；缓存匹配的是前缀，不是一组块；做过 HTTP 缓存的人会觉得熟悉，这是同样的纪律：保持缓存键稳定，别让一个变化的请求头打碎命中率，只是层换了</li>
+</ul>
+<h2>按缓存层思考</h2>
+<ul>
+<li>顺序对了，前缀就不再是一团，变成一棵树；不同请求共享它的不同深度；每一层由范围更窄的一组请求共享，边界之上的 2.3 万 token 可以复用</li>
+<li>问提示词的问题就变了：不是"有一个 6.4 万 token 的提示词"，而是"这 6.4 万 token 里有多少是真正独有的？"；前一个是容量问题，后一个是成本问题，而成本问题才是账单上出现的那一个</li>
+</ul>
+<h2>确定性提示词构造很重要</h2>
+<ul>
+<li>更微妙的失败是：同样的信息不自动等于同样的提示词；同样的工具，顺序不同，就是两条不同的 token 序列、两个不同的缓存哈希；前缀缓存作用在 token 上，不作用在含义上</li>
+<li>提示词构造器里任何不确定性都是一次无声的缓存泄漏：无序工具列表（渲染前按稳定键排序）、JSON 序列化（一个序列化器，键排序、固定分隔符）、策略/文档组装（稳定子集排序，带分数的结果留在边界之下）、Schema 生成（启动时生成一次，缓存字符串）、空白与模板（规范化渲染后的块，做快照测试）、浮点数与 ID（显式格式化，把 ID 移到边界之下）</li>
+<li>这对 agent 系统最要紧：工具 schema 一项就能占几千 token；如果这些 schema 每次 pod 重启都以不同的键顺序重新序列化，半个集群跑的前缀与另一半不同，两边谁也用不了谁的缓存</li>
+<li>一个有用的测试：单元测试里把同一段逻辑提示词渲染两次，断言字节相等；这类 bug 立刻就能抓住</li>
+</ul>
+<h2>max-num-batched-tokens 是另一个旋钮</h2>
+<ul>
+<li>--max-num-batched-tokens 控制调度器一次迭代能处理多少 token 工作；用分块 prefill 时，一段长提示词会拆到多次迭代里；批 token 预算控制 prefill 在多次迭代里的节奏，它从不改变缓存命中率</li>
+<li>预算范围：4K 粒度很细，交互公平性最好，prefill 吞吐最低；8K 均衡默认；16K 偏向吞吐；32K 激进 prefill，长提示词完成快，短请求要等</li>
+<li>两件事要分清：较新的 vLLM 版本默认开启前缀缓存，先查版本，别以为这个标志在起作用；选 4K 而不是 8K 并不能改善前缀复用；调度预算改变的是 prefill 工作怎么排布，只有提示词结构改变 prefill 工作有多少</li>
+</ul>
+<h2>别在信任边界之间随便共享前缀</h2>
+<ul>
+<li>前缀复用是一个带安全面的性能特性：缓存命中的时间可以被观测到，命中与未命中的延迟差别能泄露某个前缀以前有没有出现过；如果前缀内容本身敏感，按租户隔离缓存，别指望哈希能保护隐私</li>
+<li>共享前缀里只能放共享的真理：全局指令与公开策略可以共享；每个用户的权限、授权与个人信息属于边界之下，放在那个用户自己的前缀链里；权限检查属于工具层，在调用时强制执行，绝不能只写在提示词文本里</li>
+</ul>
+<h2>实用检查清单</h2>
+<ul>
+<li>每个提示词都按变化率排序；变化最慢的内容放最前，每个请求独有的内容放最后；图方便也不例外</li>
+<li>在模板里放一个字面边界标记：一条注释或分隔符，写明"这条线以下不可缓存"，代码评审里违规一眼就能看出来</li>
+<li>把时间戳、请求 ID、trace ID 与会话 ID 移到边界之下；它们几乎从来不需要放在最上面，而且是头号最常见的缓存杀手</li>
+<li>让构造器确定性：工具列表排序、一个规范 JSON 序列化器、schema 在启动时生成一次</li>
+<li>对稳定前缀做快照测试：渲染两次，断言字节相等；把黄金输出存下来，意外的重排会在 CI 里失败</li>
+<li>衡量前缀命中率，不只看延迟；看不见命中率，就没法知道一次重构有没有毁掉它</li>
+<li>让广泛共享的层不含任何用户特有的东西；性能边界与信任边界必须一致</li>
+<li>单独给调度预算做基准测试；调 max-num-batched-tokens 是为了公平性与吞吐，别指望它修复缓存复用</li>
+<li>大多数在构建时不花什么成本；只需要在提示词构造器长出五十个调用点之前就定下来</li>
+</ul>
+<h2>更大的教训</h2>
+<ul>
+<li>上下文窗口拉到 32K、64K、128K、256K 时，"模型能处理多少 token？"不再是有意思的问题；更有意思的问题是：这些 token 里有多少真的需要重算？</li>
+<li>如果前 2.5 万 token 在几千个请求之间共享，那它其实不是 5 万 token 的工作，是 2.5 万 token 的工作加一次查找</li>
+<li>有时候答案不是"Buy another GPU."，有时候是"Design the prompt better."；提示词里一个时间戳放哪里这样小的决定，能一路影响到 GPU 利用率</li>
+<li>当前的心智模型把一次 AI 请求想成两半，中间有一条边界：让真正可复用的上下文尽量大，同时让动态的那一半保持小、新鲜、相关</li>
+<li>基础设施必须撑得住这个愿景：一旦这样想，各层就不再独立；提示词结构影响前缀缓存命中率，记忆架构影响每次请求的上下文大小，工具架构影响提示词大小与 schema 变化，RAG 架构影响动态尾巴的大小，Agent 设计影响并发与请求扇出，模型选型影响每个 token 的 KV 缓存占用，上下文长度影响 GPU 容量与最大批大小；提示词工程就是系统工程</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
