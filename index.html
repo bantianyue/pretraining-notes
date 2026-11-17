@@ -788,6 +788,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">推理可观测</span><span class="tag">SGLang</span><span>收藏于 2026-11-17</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">69</span>《Grove 三值 MoE 预训练框架》FSDP 跑出 52.9% MFU，Maple 比 Megatron 便宜 2 倍多</h3>
+  <p>自研框架 Grove 围绕三值 MoE 从底层设计：结构感知分片（Muon 零额外通信、量化组留在分片内、三值权重打包进 uint8 省 8 倍通信量）、低竞争分层 all-gather（NVSwitch 组播加 rail RDMA，比零 SM 基线带宽高 10% 以上）、冗余专家（Kimi K3 规划算法均衡负载）；FSDP 52.9% MFU 对 xllm 26.1%，Maple 4T token 预训练 4 万美元，比 Megatron、xllm 便宜 2 倍多；DualPipeV 加推迟权重梯度，气泡 19% 降到 9%。</p>
+  <div class="links">
+    <a class="cn" href="pages/grove-ternary-moe-pretraining.html">中文精读 →</a>
+    <a class="en" href="https://deepgrove.ai/infra">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度训练</span><span class="tag">并行策略（训练）</span><span class="tag">训练框架</span><span class="tag">MFU</span><span>收藏于 2026-11-17</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
