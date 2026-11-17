@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang 推理性能分析：prefill 峰群对应 6 组混合块，decode 全是瘦 GEMV · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang 推理性能分析：prefill 峰群对应 6 组混合块，decode 全是瘦 GEMV</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://jino-rohit.github.io/blogs/16_llm_profiling.html">https://jino-rohit.github.io/blogs/16_llm_profiling.html</a></div>
+<h1>SGLang 推理性能分析：prefill 峰群对应 6 组混合块，decode 全是瘦 GEMV（中文精读）</h1>
+<ul>
+<li>原文：Profiling LLM Inference with SGLang and Torch Profiler，Jino Rohit</li>
+<li>原文链接：https://jino-rohit.github.io/blogs/16_llm_profiling.html</li>
+<li>收藏日期：2026-11-17</li>
+<li>星级：4⭐</li>
+<li>主题：推理优化、推理可观测、SGLang、性能分析、MoE</li>
+</ul>
+<h2>一句话要点</h2>
+<p>SGLang 内置的 Torch Profiler 加 Perfetto 时间线，能把一次推理拆成 CPU 侧发起与 GPU 侧执行两条线对照。Qwen3.5-0.8B 在单块 L4 上，prefill 的重复峰群与模型 6 组混合块一一对应，decode 则被一连串瘦 GEMV 占满；最贵的一颗核是只跑一次的词表投影 gemv，2063.7 微秒。先算 roofline 再看 trace：batch 1 decode 的带宽上限 187.5 token/s、算力上限 75k token/s，decode 天生靠近显存带宽上限。</p>
+<h2>核心数字</h2>
+<ul>
+<li>模型：Qwen3.5-0.8B，隐藏维度 1024，词表 248k，24 层，6 组（3 个门控 DeltaNet + FFN，加 1 个门控注意力 + FFN），上下文 262k token</li>
+<li>权重：bf16 下 0.8B 参数占 1.6 GB；L4 带宽 300 GB/s；batch 1 decode 带宽上限 187.5 token/s；算力上限 75k token/s</li>
+<li>词表投影：[1, 1024] @ [1024, 248320] = [1, 248320]，grid 31040（248320 / 8），block 8×8，占用率 25%</li>
+<li>prefill 最贵的核（总耗时 / 次数 / 平均）：gemv 2063.7 微秒 / 1 / 2063.7 微秒；ampere_bf16_s16816gemm_bf16_128x128，1705.4 微秒 / 24 / 71.1 微秒；cutlass_80_wmma_tensorop_bf16_32x32，1553.5 微秒 / 18 / 86.3 微秒；ampere_bf16_s16816gemm_bf16_64x64，848.1 微秒 / 24 / 35.3 微秒</li>
+<li>128x128 GEMM 出现 24 次，对应每块一次大的投影式操作；CUTLASS GEMM 出现 18 次，对应 18 个 GDN 块</li>
+<li>采样设置：热身 5 步后采 2 步，prefill 与 decode 分两条 trace；提示 45 个 token</li>
+</ul>
+<h2>先算 roofline 再看 trace</h2>
+<ul>
+<li>0.8B 参数用 bf16 占 1.6 GB；L4 带宽 300 GB/s，每 token 搬 1.6 GB 权重，带宽上限 187.5 token/s</li>
+<li>每 token 的推理开销粗估 2P FLOPs：1.6 GFLOPs，bf16 tensor 吞吐约 121 TFLOPS，算力上限 75k token/s</li>
+<li>算力上限比带宽上限高得多，看 trace 之前的出发假设是 batch 1 decode 更靠近显存带宽上限；性能分析要么证实这点，要么解释它为什么错了</li>
+</ul>
+<h2>启动方法</h2>
+<ul>
+<li>安装 CUDA toolkit 13.2，用 uv 建虚拟环境装 SGLang（prerelease），<code>sglang serve --model-path Qwen/Qwen3.5-0.8B</code></li>
+<li>性能分析端点 <code>/start_profile</code>：<code>output_dir</code>、热身 5 步、采 2 步、<code>activities</code> 含 CPU 与 GPU、<code>profile_by_stage</code> 为真、<code>record_shapes</code> 与 <code>with_stack</code> 为真</li>
+<li>发一个请求：<code>python -m sglang.bench_serving --backend sglang --num-prompts 1</code></li>
+<li>CUDA 启动是异步的：CPU 时间线上一颗核出现得早，GPU lane 里它实际跑得晚；读 trace 时 CPU 侧先看谁发起的活，GPU 侧看设备时间花在哪</li>
+<li>trace 文件在 Perfetto UI 里打开查看</li>
+</ul>
+<h2>prefill 全景</h2>
+<ul>
+<li>prefill 是模型消费提示词 token 并产出一个 token 的阶段；性能分析器上半是 CPU 侧操作，下半是 GPU 侧操作</li>
+<li>峰以 3 个一组出现，中间夹一个小峰；第一个峰比其他的大得多</li>
+<li>放大最左侧的小峰：启动 torch profiler、SGLang 准备组装输入 batch、设置 CUDA 数据流，一切就位等前向跑起来</li>
+<li>点开一个 CPU 操作，能关联到它发起的那颗核；一次 host 到 device 的拷贝很小，大概是请求元数据、token id 或调度器需要的小张量，从 pinned CPU 内存拷到 GPU</li>
+</ul>
+<h2>模式一：重复峰群就是 6 组混合块</h2>
+<ul>
+<li>prefill 主计算区的峰群不是随机的，对照模型结构，峰的分组与 6 组混合块正好对上：每组 3 个 GDN 块加 1 个全注意力块，重复 6 次</li>
+<li>第一组里的第一个峰比其他的大得多，推测是第一个混合块通常比其他块多一些启动成本</li>
+<li>接下来的两个峰是 GDN 块，里面的核包括 causal_conv1d_fn、fused_qkv_split_gdn_prefill、fused_gdn_gating、ChunkGatedDeltaRuleFunction、l2norm_fwd、chunk_local_cumsum、chunk_gated_delta_rule_fwd_kkt_solve、recompute_w_u_fwd、chunk_gated_delta_rule_fwd_h、chunk_fwd_kernel_o；点开 GPU 区域里的核可以验证</li>
+<li>较小的第四个峰是全注意力块，用 FlashInfer；提示只有 45 个 token，全注意力并不是瓶颈</li>
+<li>核区域里的模式：重复的绿色粗段，末尾一颗大的蓝色核</li>
+</ul>
+<h2>最后的词表投影：只跑一次却最贵</h2>
+<ul>
+<li>推过整段重复峰，进入最后一段：服务器转入清理并准备 decode，有最终投影到 logits、采样、把结果拷回 CPU</li>
+<li>点开 CPU 侧的 <code>aten::mm</code>，展开参数：输入类型 bf16，输入形状 [1, 1024] 与 [1024, 248320]</li>
+<li>概念上是 [1, 1024] @ [1024, 248320] = [1, 248320]；词表太大，这一步变成大规模矩阵向量式投影，整个 prefill 里只跑一次，仍是这一段里最慢的核之一</li>
+<li>核的细节：grid [31040, 1, 1]，block [8, 8, 1]，每线程寄存器 168，共享内存 288，占用率 25%；网格形状来自 248320 / 8 = 31040</li>
+<li>最终线性头把一个 1024 维隐向量投到很宽的词表维度上；优化这条路的话，值得看这段投影能不能融合，或找类似的优化</li>
+</ul>
+<h2>prefill 最贵的核</h2>
+<ul>
+<li>gemv 核最贵，尽管只调用一次：2063.7 微秒</li>
+<li>128x128 的 BF16 GEMM 出现 24 次，正好对应每个块一次大的投影式操作；较小的 CUTLASS BF16 GEMM 出现 18 次，正好对应 18 个 GDN 块</li>
+<li>只看核名会很吵、很难理解，对照模型布局与数据流一起读，trace 就好推理得多</li>
+</ul>
+<h2>decode：采了两步，所以有两次 pass</h2>
+<ul>
+<li>decode 是另一类工作负载：prefill 处理整个提示序列，很多操作有足够的工作量，能长成像样的 GEMM；decode 在小 batch 下一次只处理一个新 token，很多投影工作塌成瘦矩阵向量操作</li>
+<li>高亮区域是重点；周围区域大多是性能分析器的启动/收尾、输入准备、同步与记账，值得理解，但不是模型主计算路径</li>
+<li>左边 SGLang 加载 batch，把这一步 decode 的输入拷进固定的 CUDA 图缓冲；中间是真正的 decode 工作；CPU 时间线没有把每个模型层展开成一层层单独的启动，因为 decode 路径用的是 CUDA 图重放</li>
+<li>图重放之前有少量小核与拷贝做准备，不是层堆叠，大多在准备被捕获的图所需的固定缓冲与执行状态；点进图重放区域，GPU 核就在这次重放下面露出来</li>
+</ul>
+<h2>decode 被瘦 GEMV 占满</h2>
+<ul>
+<li>重复的蓝色条是词表投影附近见过的那个 GEMV 家族；decode 里它们一遍遍出现，因为 batch 1 decode 把很多线性层变成矩阵向量式操作</li>
+<li>核心性能问题：GEMV 的算术强度比大 GEMM 低得多，权重从显存大量流过，却没有足够复用来让 tensor core 像 chunky 的 prefill GEMM 那样保持忙碌；哪怕 GPU 算力绰绰有余，decode 路径也会被显存带宽卡住</li>
+<li>细小的红绿紫点是混合块里其他核，重要，但这次 batch 1 的 trace 形状主要在讲一件事：decode 路径是一长串瘦投影</li>
+<li>增大 batch 会改变局面：batch 一大，有些瘦操作就没那么瘦，工作负载更接近 GEMM 形态，GPU 每搬一字节权重能做更多有用的数学；batch 不是免费的，KV 缓存、时延、调度与显存压力都要算进去，但它解释了单请求 decode 为什么对 GPU 这么难</li>
+</ul>
+<h2>下一步</h2>
+<ul>
+<li>拿大 batch 与长提示重复这套分析，分清哪些瓶颈只属于 batch 1 decode，哪些在 GPU 有更多并行工作可 chew 时依然难受</li>
+</ul>
+<h2>参考链接</h2>
+<ul>
+<li>Jino Rohit 原文：https://jino-rohit.github.io/blogs/16_llm_profiling.html</li>
+<li>Perfetto UI：https://ui.perfetto.dev/</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
