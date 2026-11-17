@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Grove：为三值 MoE 预训练造的框架，FSDP 跑出 52.9% MFU · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Grove：为三值 MoE 预训练造的框架，FSDP 跑出 52.9% MFU</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://deepgrove.ai/infra">https://deepgrove.ai/infra</a></div>
+<h1>Grove：为三值 MoE 预训练造的框架，FSDP 跑出 52.9% MFU</h1>
+<ul>
+<li>原文：<a href="https://deepgrove.ai/infra">Inside the Grove: Infrastructure for Pretraining Ternary MoEs at Scale</a>（DeepGrove 官方博客，2026-11-05）</li>
+<li>作者：Aarnav Rawat、Shayaan Emran</li>
+<li>主题：低精度训练（三值量化）、并行策略（FSDP / DDP / PP / EP）、训练框架、MFU</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：自研框架 Grove 围绕三值 MoE 从底层设计，结构感知分片加低竞争通信加冗余专家，Maple 在 4T token 上预训练比 Megatron、xllm 快 2 倍以上、便宜 2 倍以上；FSDP 52.9% MFU。</li>
+</ul>
+<h2>核心结论</h2>
+<p>DeepGrove 自研训练框架 Grove，为大规模预训练三值混合专家模型（MoE）而建。权重只取 -1、0、+1 三值，框架围绕三个原则设计：易用性、自动化、低精度。两个后端：Grove-FSDP（灵活、高性能）与 DDP（带分布式优化器状态，为极度稀疏模型扩展）。</p>
+<p>最亮的数字：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>模型</th>
+<th>Grove MFU</th>
+<th>基线 MFU</th>
+<th>加速比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FSDP</td>
+<td>Maple</td>
+<td>52.9%</td>
+<td>xllm 26.1%</td>
+<td>2.03×</td>
+</tr>
+<tr>
+<td>DDP + EP</td>
+<td>Qwen3 30B-A3B</td>
+<td>38.3%</td>
+<td>Megatron 32.3%</td>
+<td>1.19×</td>
+</tr>
+<tr>
+<td>DDP + PP + EP</td>
+<td>40B-A1.6B</td>
+<td>39.0%</td>
+<td>Megatron 25.9%</td>
+<td>1.51×</td>
+</tr>
+</tbody>
+</table>
+<p>全部结果在 H100 上，MFU 按 bf16 峰值算。每个基线都从最接近 Grove 的配置起步，再手工调优提高 MFU。</p>
+<p>成本对比（4T token 预训练 Maple，H100，每 GPU 小时 2 美元）：Grove 4 万美元（54.9k tokens/s/GPU、20.2k GPU 小时、64 块 GPU 上 13.2 天、每 1T token 1.01 万美元）；xllm 8.2 万美元（27.0k、41.2k、26.8 天、2.06 万美元）；Megatron 9 万美元（24.6k、45.2k、29.4 天、2.26 万美元）。</p>
+<h2>为什么做三值</h2>
+<p>DeepGrove 认为最高效的模型要从底层为效率设计，包括架构与精度。三值预训练很难，但有必要：低比特训练远非已解决的科学，尤其在 4 比特以下，几乎没有公开发表的工作探索大规模训练。随着权重缩到越来越少的比特，标准与高比特量化预训练里习以为常的算法（优化器、直通估计）都要重新思考。</p>
+<p>三值的好处不只省显存：把栈里适合三值的部分专门优化后，传更少的数据、内存开销更低，很多情况下 GEMM 吞吐还略高（动态功耗与开关功耗更低）。</p>
+<h2>Grove-FSDP：结构感知分片</h2>
+<p>FSDP 支撑大部分训练任务。已有实现（FSDP2）缺少低精度通信、零拷贝收集等功能，性能不够理想，DeepGrove 自己实现了一个性能更高的 FSDP。</p>
+<p>权重路径分四步（图 2）：</p>
+<ol>
+<li><strong>分片（Sharding）</strong>：结构感知分片算法，沿矩阵边界切。76 个量化组分给 4 块 GPU（18/19/19/20 组），embed 与 lm head 保持 bf16。Muon 这类优化器可以零额外通信地跑在完整矩阵上；量化组保留在分片内，各 GPU 先量化自己的权重分片再做 FSDP all-gather，量化时间分摊到各 GPU 上。</li>
+<li><strong>量化（Quantization and packing）</strong>：各 GPU 把自己的分片三值化，4 个权重打包进 1 个 uint8（64 位降到 8 位）。三值权重打包进 uint8 张量，通信量最多省 8 倍，FSDP 在梯度通信成为瓶颈之前就能扩展到相当稀疏的模型。</li>
+<li><strong>Packed all-gather</strong>：打包分片全收集。</li>
+<li><strong>零拷贝视图（Zero-copy views）</strong>：零拷贝 FSDP 把参数收集进对齐的内存布局，前向与反向操作直接取收集到的参数的视图，无复制。</li>
+</ol>
+<h2>低竞争通信</h2>
+<p>权重能以量化形式通信，通信量就降下来了。但通信与计算重叠时，标准 NCCL 集合操作会争用 SM，让计算明显变慢。Grove 设计了定制的低竞争通信集合操作，在保持带宽的同时把通信工作尽量从 SM 上卸下来。平均下来，定制的通信集合操作靠更低的 SM 竞争与通信开销，把 MFU 提高 2~3 个点。</p>
+<ul>
+<li><strong>分层 all-gather</strong>：跨节点通信用 GPU 发起的 RDMA，经每块 GPU 的 rail 走；节点内通信用 NVSwitch 组播拷贝。比零 SM 基线带宽至少高 10%，与计算重叠时计算减速最小。用激活 offload 时，把每次激活存储切成块，让收集操作能在 offload 块操作之间运行，带 offload 的收集几乎与不带 offload 一样快。</li>
+<li><strong>梯度 reduce-scatter</strong>（图 3，两节点、每节点两块 GPU）：权重通信量压下来后，梯度通信变成最贵、竞争最高的通信操作。两种 reduce-scatter：一种经 bf16 all-to-all 通信加 fp32 求和；另一种定制的先用 NVSwitch 在节点内做 fp32 梯度求和，再把节点内和以 bf16 发给梯度分片的持有者，在持有者上累加得到最终 fp32 梯度。第二种多了一次 bf16 舍入，误差略升，实际收敛没有差别。实验性的亚 16 比特 reduce-scatter：梯度量化到 8 比特 LogFMT，每 32 个权重一个 fp32 scale，平均每张量 9 比特。</li>
+</ul>
+<p>图 3 的五步：本地梯度（每块 GPU 持全部 4 个分片的 BF16 梯度）→ NVSwitch 求和（节点内 NVSwitch 做 FP32 求和，得 rail 和）→ 移到 rail GPU → rail 交换（rail 对等体经 InfiniBand 以 BF16 互换）→ 求和（每块 GPU 以 FP32 合并两路 rail 和）。</p>
+<h2>DDP：统一内存引擎与专家并行</h2>
+<p>Grove 也支持标准 DDP 后端（带分布式优化器状态），可与流水线并行（PP）与专家并行（EP）组合。实现同时追求最大自动化与最大可配置性。</p>
+<ul>
+<li><strong>统一内存引擎（Activation Engine）</strong>：受 Kimi K3 启发的统一内存引擎。每个反向激活由单个管理器跟踪，分一个存储属性：留在 GPU 上、offload 到 host、或重算。DeepGrove 也试验自动内存管理：用小型校准跑给每个激活张量画像，记录占用、生命周期与重算代价，再用贪心规划器按画像释放内存，直到峰值内存落进目标，优先释放每毫秒重算省内存最多的张量。规划器并不完全准确，性能关键时仍手工调激活内存。</li>
+<li><strong>专家并行（Expert Parallelism）</strong>：主要面向节点内使用，重点是缓解路由不均衡带来的慢通信。办法是冗余专家：自动规划，加一组冗余专家槽。专家槽给够时，用 Kimi K3 的规划算法完美均衡负载；槽不够时，默认用 UltraEP 的算法。专家并行能与 DDP（带重叠通信与计算的调度）、PP 与 FSDP 组合。</li>
+</ul>
+<p>图 4 的四步（230 个 token，150 个路由到 rank 0 的专家 0）：规划（每块 GPU 持自己的 token，每格一个 token，按路由专家着色）→ 分发加权重传输（副本分担专家 0 的 18、34、40 个 token，GPU 0 的专家 0 剩 28 个）→ 专家计算（最忙专家耗时与最闲专家相同）→ 合并（输出经 all-to-all 回到各 token 的归属 GPU，按 router 分数加权合并）。</p>
+<h2>流水线并行：DualPipeV</h2>
+<p>流水线并行用于跨节点扩展，因为它把节点间通信压到最小。DeepGrove 主要用 DualPipeV：基准测试里，这个排程比带虚拟流水线并行的交错 1F1B 快 10% 左右，尽管理论气泡更大。PP 通信也试验过零 SM 通信，收益很小，最后保留标准 NCCL 通信。</p>
+<p>流水线并行带来可观的 CPU 调度开销，办法是把整个步完全捕获进 CUDA 图。自动规划器帮忙均衡排程，并把推迟的权重梯度计算填进流水线排空的气泡。</p>
+<p>图 5（4 个流水线 rank、10 个 microbatch）：推迟权重梯度（W）把它移进结尾排空的气泡，步长从 74 单位降到 66 单位，气泡从 19% 降到 9%。</p>
+<h2>结果细节</h2>
+<ul>
+<li>FSDP 训标准 MoE 模型（比如 Maple）超过 50% MFU，4T token 左右的生产规模运行在 64 块 GPU 上不到两周完成。H100 上显存吃紧时，架构更复杂的模型（最大 140B 参数）也能拿到约 45% MFU。</li>
+<li>DDP 加专家并行在 Maple 上约 40% MFU；调优较少的 Qwen3 30B-A3B 上约 38% MFU，是 Megatron 的 1.2 倍左右。</li>
+<li>DDP 加流水线加专家并行在内部 40B-A1.6B 上 39% MFU；但流水线栈的性能随模型形状变化大，同样稀疏但更难均衡的模型（比如 Qwen3-Next 80B-A3B）只有约 33% MFU。</li>
+</ul>
+<h2>未来工作</h2>
+<ol>
+<li><strong>微重叠专家并行（Micro-Overlapped EP）</strong>：正在开发自研的微重叠专家并行核，受 UniEP 与 Mixture of Kittens 启发；目前相对完美均衡加 microbatch 重叠的配置，性能提升很小；但加上专家复制等改进后，预期会成为更快的替代方案。</li>
+<li><strong>梯度压缩（Gradient Compression）</strong>：模型权重压缩能力极强，梯度通信在 FSDP 或 ZeRO-2 配置里通常是更贵的操作；已探索过一些梯度压缩版本，比如 9 比特的工作；梯度通信能否在不损失太多保真度的前提下进一步压缩，仍是开放问题。</li>
+<li><strong>智能体原生基础设施与自动化（Agent-Native Infrastructure &amp; Automation）</strong>：编码智能体已用于基础设施开发与研究；DeepGrove 正在探索让编码智能体在预训练生态里工作与开发，包括更好的性能分析工具与 harness；智能体也能缓解目前大量人工调优负担。</li>
+</ol>
+<p>下一步：用 Grove 扩大规模，未来运行的总 FLOPs 远大于 Maple。如果激进的低精度训练在大规模下成立，更强的原生硬件支持会自然跟上，智能的经济学将根本改变。</p>
+<h2>值得记住的取舍</h2>
+<ul>
+<li>通信优化的优先级跟着瓶颈走：权重通信量压下来后，梯度通信就成了最贵的操作；梯度压下来后，下一个瓶颈才轮到别处。</li>
+<li>低竞争比高带宽更重要：NCCL 的问题不是带宽不够，是集合操作争用 SM，拖慢计算。分层 all-gather 用 NVSwitch 组播加 rail RDMA，带宽只高 10%，但不占 SM。</li>
+<li>负载均衡的两种打法：槽够用时用 Kimi K3 规划算法做到完美均衡；槽不够时退到 UltraEP 的算法。冗余专家是把权重复制换成时间。</li>
+<li>流水线气泡的填法：不是减少气泡，而是把推迟的权重梯度计算填进去。DualPipeV 理论气泡更大，实测反而快 10%。</li>
+</ul>
+<h2>参考</h2>
+<ul>
+<li>原文：<a href="https://deepgrove.ai/infra">Inside the Grove: Infrastructure for Pretraining Ternary MoEs at Scale</a></li>
+<li><a href="https://deepgrove.ai/maple-preview">Maple preview</a></li>
+<li><a href="https://deepseek-v3.ezyang.com/studies/03-roofline.html">Working the roofline for DeepSeek-V3 on Hopper</a></li>
+<li><a href="https://allenai.org/papers/olmocore3">Supercharging Olmo-core for Efficient and Scalable MoE Training</a></li>
+<li><a href="https://arxiv.org/abs/2602.22437">veScale-FSDP: Flexible and High-Performance FSDP at Scale</a></li>
+<li><a href="https://arxiv.org/abs/2604.17172">UCCL-Zip</a></li>
+<li><a href="https://arxiv.org/abs/2608.09119">Motif 3 Technical Report</a></li>
+<li><a href="https://arxiv.org/abs/2505.09343">Insights into DeepSeek-V3</a></li>
+<li><a href="https://blog.character.ai/squinch/">Squinch: 6-bit gradient compression</a></li>
+<li><a href="https://arxiv.org/abs/2607.24653">Kimi K3: Open Frontier Intelligence</a></li>
+<li><a href="https://arxiv.org/abs/2606.04101">UltraEP</a></li>
+<li><a href="https://github.com/deepseek-ai/DualPipe">DualPipe</a></li>
+<li><a href="https://www.usenix.org/system/files/osdi26-hu-weifang.pdf">Tessera</a></li>
+<li><a href="https://arxiv.org/abs/2604.19241">UniEP</a></li>
+<li><a href="https://cursor.com/blog/mixture-of-kittens">Mixture of Kittens</a></li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
