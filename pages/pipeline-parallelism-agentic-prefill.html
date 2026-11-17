@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>流水线并行做 Agent prefill：每批只同步一次，单卡请求数比 DEP2 高 23% · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>流水线并行做 Agent prefill：每批只同步一次，单卡请求数比 DEP2 高 23%</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://inferact.ai/news/pipeline-parallelism-in-agentic-era">https://inferact.ai/news/pipeline-parallelism-in-agentic-era</a></div>
+<h1>流水线并行做 Agent prefill：每批只同步一次，单卡请求数比 DEP2 高 23%（中文精读）</h1>
+<ul>
+<li>原文：Pipeline Parallelism for Prefill in the Agentic Era，Inferact（Siyu Liu、Thien Tran、Zijing Liu、Zixi Qi、Summer Yang、Perry Zhou、Zhewen Li、Taoyu Zhu、Ming Gao），2026-11</li>
+<li>原文链接：https://inferact.ai/news/pipeline-parallelism-in-agentic-era</li>
+<li>收藏日期：2026-11-17</li>
+<li>星级：4⭐</li>
+<li>主题：并行策略（推理）、推理优化、vLLM、MoE、流水线并行</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Agent 时代的 prefill 改写了并行方式的取舍：首 token 时延目标放宽到数秒后，同步最少的流水线并行反而最能撑请求。两块 B300 上用 vLLM 跑 MiniMax-M3.1-Flash，2 秒 p50 首 token 时延目标下，PP2 每块 GPU 可持续的请求数比 DEP2 高 23%、比 TP2 高 17%；饱和时 PP2 与 DEP2 的吞吐只差 1% 以内。压小气泡的两招是拷贝引擎交接（stage 0 单边推数据、不占 SM）与异步调度（最多 3 个 batch 在飞）。</p>
+<h2>核心数字</h2>
+<ul>
+<li>2 秒 p50 首 token 时延目标下最高可持续速率（请求/秒/GPU）：TP2 2.875、DEP2 2.75、PP2 3.375，PP2 比 DEP2 高 23%、比 TP2 高 17%</li>
+<li>1 秒目标：TP2 2.5、PP2 2.125、DEP2 无（最低测速 1.75 时 p50 已超 1 秒）；1.5 秒目标：TP2 2.75、DEP2 2.375、PP2 2.875</li>
+<li>饱和时（32 个请求在飞）：TP2 2.94、DEP2 3.57、PP2 3.60 请求/秒/GPU，PP2 与 DEP2 差 1% 以内</li>
+<li>轻负载 p50 首 token 时延（0.88 请求/秒/GPU）：TP2 0.31 秒、DEP2 0.62 秒、PP2 0.45 秒；110K token 提示 PP2 比 TP2 多 0.14 秒</li>
+<li>每计算 token 的 GPU 时间（完整 32,768 token 步，两块 GPU 之和）：TP2 34.0 微秒、DEP2 27.8 微秒、PP2 27.2 微秒；TP2 的 all-reduce 加暂存拷贝每 token 6.3 微秒，占 TP2 GPU 时间的 18%</li>
+<li>DEP2 不均衡：2.20 请求/秒/GPU 时只有 8% 的步两个 rank 在 1.2 倍以内，38% 的步一个 rank 没有 token；等待加 MegaMoE 慢跑占 DEP2 繁忙 GPU 时间的 37%，3.0 时降到 20%</li>
+<li>6 个请求在飞的分流实验：DEP2 3:3 是 2.528 请求/秒/GPU（基准）；4:2 是 2.156（-15%）；5:1 是 2.017（-20%）；6:0 是 1.433（-43%）；PP2 2.344（-7%）；TP2 2.778（+10%）</li>
+<li>拷贝引擎交接的 p50 首 token 时延变化（相对未改 day-0 镜像，三轮中位数）：2.16 请求/秒/GPU 时 -12.0%，3.375 时 -15.8%，3.5 时 -16.0%，3.625 时 -8.5%，饱和速率 +0.4%</li>
+<li>气泡：2.20 请求/秒/GPU 时每个 stage 约 29% 的时间在等对方，3.0 时约 15%；2.20 时两个 stage 同时算只占 33%，19% 的时间只有一个 batch 在飞</li>
+<li>饱和时：DEP2 的 rank 互等占 GPU 时间 1.1%；PP2 的 stage 0 每批比 stage 1 多花 3.8%，stage 1 空等 4% 的时间；每次完整 batch 的交接 1.05 毫秒</li>
+<li>模型与实例：MiniMax-M3.1-Flash，60 层（0~2 层 dense、57 层 MoE），每 MoE 层 128 个路由专家加共享专家，checkpoint 250 GB；两块 B300 是装得下的最小实例；每步 120 次 all-reduce（每层 2 次 × 60 层）</li>
+</ul>
+<h2>三种并行，差别在同步</h2>
+<ul>
+<li>TP 切每个权重矩阵，所有 GPU 算每个 token，每层两次 all-reduce 合并部分结果</li>
+<li>DEP 每块 GPU 一个 rank，各跑各的请求，拿 attention 与 dense 权重的完整副本与每层 1/N 的专家，每 MoE 层与其他 rank 交换 token</li>
+<li>PP 每块 GPU 拿 1/N 的层（stage），hidden states 每批移向下一 stage，N 个 batch 在飞让 N 块 GPU 都忙</li>
+<li>一次大的 prefill 步有几千 token，会读每 MoE 层的全部专家，三种并行每步读的权重相同；差别只在 GPU 之间多久同步一次、以及什么让同步变久</li>
+<li>TP 同步最频繁：每层、任何负载下都在同步，换来最低的时延；DEP 只要一个 rank 的 token 比另一个少就等；PP 每批只在 stage 边界同步一次，stage 只有流水线不满时才等</li>
+</ul>
+<h2>为什么 Agent prefill 适合 PP</h2>
+<ul>
+<li>PP 平时少用的两个原因：不降单个请求的时延，batch 太少时 stage 空转（气泡）</li>
+<li>Agent 的 prefill 削弱了这两条反对理由：每轮往长缓存上下文里加几千 token，再花几秒解码与调用工具，数秒的首 token 时延目标完全够用</li>
+<li>剩下的就是吞吐：在时延目标下，每种并行每块 GPU 能撑多少请求，以及 PP 的气泡能压多小</li>
+</ul>
+<h2>TP2 的通信税</h2>
+<ul>
+<li>完整步里 TP2 每计算 token 用 34.0 微秒 GPU 时间，比 DEP2 与 PP2 多约五分之一；多出来的就是通信</li>
+<li>attention 之后与每 MoE 层之后的 all-reduce，加上为它们准备的拷贝，每 token 6.3 微秒，占 TP2 GPU 时间的 18%；每次 all-reduce 都搬整步的 hidden states，而且在关键路径上不与计算重叠</li>
+<li>序列并行能去掉一部分这项成本；配方只在 MI355X 上给 prefill 提供，这次没测</li>
+</ul>
+<h2>DEP2 的不均衡税</h2>
+<ul>
+<li>每个 DEP2 rank 用自己的请求组步，但每 MoE 层都要同步，每步的时长由更重的那个 rank 决定；MegaMoE 把大部分 token 交换与专家 GEMM 重叠了，等比字节数更要紧</li>
+<li>一个 rank 的工作量是新 token 加上它们 attend 的缓存上下文；缓存上下文代价小（MiniMax 稀疏注意力每个 query 最多读 16 个 block，工作负载里每个请求共享同一个 100K 前缀），新 token 才是 rank 之间不一样的地方</li>
+<li>三个原因：router 按请求数（vLLM 内置负载均衡器按排队加运行请求最少的 rank 发，Dynamo 默认 round-robin，Dynamo 与 SMG 提供按在飞请求选的策略）；请求不能跨 rank 拆（在飞少时一个 rank 常常一个请求都没有，只能跑空 batch）；每个 rank 自己切请求（32,768 token 步预算与 8,192 token 单请求上限各用到自己的队列上）</li>
+<li>分均匀时 DEP2 在 2.20 请求/秒/GPU 的负载下赢 PP2，但 4:2 一分就落后 8%，分越斜输得越多；TP2 给得最多，与它轻负载下首 token 时延最低一致</li>
+<li>DEP 可以比按请求数分得更匀：DeepSeek 的 DeepInfer 部署说明讲了一种 prefill 均衡器，按估计工作量把每个请求发给工作量最小的 rank；Dynamo 与 SMG 也提供按 token 感知的策略；这类策略能拉平两个都有活的 rank，但帮不了没有请求的 rank</li>
+</ul>
+<h2>压小气泡的两招</h2>
+<ul>
+<li>流水线气泡是 stage 等另一方的时间：空闲，或卡在发送/接收上；vLLM 每个 PP 实例一个 scheduler，异步调度下 PP2 最多 3 个 batch 在飞，长提示的下一 chunk 在 stage 0 入队时，上一 chunk 还在 stage 1 里</li>
+<li>气泡在队列浅时出现：batch 太少填不满两个 stage、连续 batch 大小不一、stage 0 等 stage 1 接收上一 send；气泡随负载缩小，2.20 时每个 stage 约 29% 的时间在等对方，3.0 时约 15%</li>
+<li>拷贝引擎交接：stage 交接从 NCCL 换到 CUDA 拷贝引擎，GPU 侧同步；单边推（stage 0 看到 GPU 侧 flag 空闲就写进 stage 1 的接收缓冲、随即继续，只在 stage 1 落后超过约一个 batch 时才等）；不占 SM（NCCL 的 send 是个 kernel，与下一 batch 的计算并行，许多 persistent kernel 按满 SM 数定 grid，被占 SM 时就错了）</li>
+<li>交接降的是等待，不是计算：p50 首 token 时延在每个负载下都降了 8.5%~16%，饱和速率基本不变（+0.4%）</li>
+<li>stage 1 开头的填充在两种交接下都一样；拷贝引擎交接改不了它，batch 太少时它仍是 PP2 气泡里的大头</li>
+</ul>
+<h2>局限与下一步</h2>
+<ul>
+<li>轻负载下单个请求可能更慢：请求先过 stage 0 再过 stage 1，这很可能是 TP2 轻负载首 token 时延最低的原因</li>
+<li>P/D 分离要多做工作：PP prefill 实例把每个请求的 KV cache 拆在各 stage，decode 侧要从每个 stage 读 KV；团队正在为 MiniMax-M3.1 上游提交带 PP prefill 的 P/D</li>
+<li>只测了两块 GPU 的实例：N 块 GPU 时，TP 的计算按 1/N 缩但 all-reduce 仍搬整步 hidden states，通信占比上升；DEP 每 MoE 层等 N 个 rank 里最慢的，不均衡代价随 N 涨；PP 填满 N 个 stage 要 N 个 batch 在飞，饱和以下气泡随 N 涨，单个请求的时延不降</li>
+<li>TP 藏在每个 PP stage 里的混合形态要 4 块以上 GPU，应落在中间；下一步测 4 块与 8 块 GPU 的交叉点</li>
+</ul>
+<h2>部署建议</h2>
+<ul>
+<li>最紧的首 token 时延目标与轻负载：选 TP；它在轻负载与中等负载下首 token 时延最低，但只在 1 秒 p50 目标下可持续速率最高</li>
+<li>数秒的首 token 时延目标：选 PP；它每批同步一次而不是每层同步，一个 scheduler 组全部 batch；1.5~2.5 秒 p50 目标下，每 GPU 多撑最高 23% 的请求</li>
+<li>无首 token 时延目标、只拼吞吐：选 DEP 或 PP；饱和时带 MegaMoE 的 DEP2 与 PP2 差在 1% 以内，但没有服务能长期跑在饱和点上</li>
+<li>用 DEP 就按工作量均衡 rank；按请求数数在饱和以下就是不匀</li>
+<li>更多 GPU 的实例还没测；其他模型要连 PP 一起测，注意力成本、专家大小、上下文长度都会移动并行方式之间的平衡点</li>
+</ul>
+<h2>测量方法</h2>
+<ul>
+<li>每种并行都跑了三个调好的配置里最好的一个，起点是配方里的 prefill 设置</li>
+<li>TP2：<code>--tensor-parallel-size 2 --enable-expert-parallel --moe-backend deep_gemm_mega_moe</code>，MoE 内核 MegaMoE</li>
+<li>DEP2：<code>--data-parallel-size 2 --enable-expert-parallel --moe-backend deep_gemm_mega_moe</code>，MoE 内核 MegaMoE</li>
+<li>PP2：<code>VLLM_PP_LAYER_PARTITION=30,30 --pipeline-parallel-size 2 --moe-backend flashinfer_trtllm</code>，MoE 内核 FlashInfer TRTLLM-Gen</li>
+<li>软件：nightly 镜像 <code>vllm/vllm-openai:cu134-nightly-335dd77b0</code> 加 <code>m31-pp-opt</code> 分支截至 c905d49 提交，含上游提交与拷贝引擎 stage 交接</li>
+<li>工作负载：每请求共享 100K token 缓存前缀，新增 7.5K~12.5K token，Poisson 到达；只做 prefill，1 个输出 token；提示是随机 token ID，在专家上的分布可能比真实文本更均匀</li>
+<li>每个速率跑三次（种子 42、43、44），每次都是新启动的服务器，步长约 4%；三次运行的 p50 首 token 时延中位数在目标内、且至少 95% 的请求完成，才算撑住了</li>
+<li>上负载前，每个配置都过了 GSM8K 与长提示首 token 对照（以 TP2 为参考）；DEP2 波动最大，2.625 请求/秒/GPU 时三次 p50 是 1.51、1.60、2.28 秒</li>
+</ul>
+<h2>参考链接</h2>
+<ul>
+<li>Inferact 原文：https://inferact.ai/news/pipeline-parallelism-in-agentic-era</li>
+<li>MiniMax-M3.1-Flash day-0 文章（NVFP4 MegaMoE）：https://vllm.ai/blog/2026-10-23-minimax-m31-flash#nvfp4-megamoe</li>
+<li>vLLM 配方：MiniMax-M3.1-Flash：https://recipes.vllm.ai/MiniMaxAI/MiniMax-M3.1-Flash</li>
+<li>DeepInfer 推理部署说明：https://github.com/deepseek-ai/DeepInfer/blob/main/doc/inference_deployment_qa.md</li>
+<li>DeepInfer 数据并行负载均衡：https://github.com/deepseek-ai/DeepInfer/blob/main/doc/inference_deployment_qa.md#data-parallel-load-balancing</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
