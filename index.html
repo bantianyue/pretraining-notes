@@ -738,6 +738,36 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">MoE 架构</span><span class="tag">训练核心流程</span><span>收藏于 2026-11-16</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">64</span>《DSpark 三层草稿加 Markov 校正》一次步进产出 5.6 个 token，8 卡 B300 上 2060 TPS</h3>
+  <p>Baseten 为 DeepSeek-V4.1-Flash 从零写 Rust 与 CUDA 推理引擎：DSpark 三层 MTP 草稿一次起草 6 个候选、秩 256 Markov 校正补 token 间依赖，目标模型一次验证 7 个位置；8 卡 B300 上 2060 TPS、平均步进 2.71ms、每步约 5.6 个 token；百万 token 预填充约 12 秒；FP8/FP4 权重、CUDA 图捕获、低 token 数 MoE 链与通信融合。</p>
+  <div class="links">
+    <a class="cn" href="pages/dspark-mtp-markov.html">中文精读 →</a>
+    <a class="en" href="https://heyyanshuman.com/posts/baseten_2000tps">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">投机解码</span><span class="tag">推理优化</span><span class="tag">MoE</span><span>收藏于 2026-11-17</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">65</span>《NeMo Gym 可验证奖励》实验记录建成 RLVR 环境，蒸馏热启动再 GRPO</h3>
+  <p>实验记录改写成 NeMo Gym 可验证奖励环境，模型用工具调用提交答案、验证器自动打分；教师模型蒸馏高质量推理轨迹做 SFT 热启动，再用 NeMo RL 做 GRPO 加 LoRA 后训练。药物代谢预测环境、16384 token 输出预算下，SFT 提升 12%、RL 再提升 17%；后训练后平均 Tanimoto 相似度从 0.69 提到 0.90。</p>
+  <div class="links">
+    <a class="cn" href="pages/nemo-gym-nemotron.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.com/blog/post-training-nvidia-nemotron-to-increase-accuracy-in-your-scientific-domain/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">后训练</span><span class="tag">GRPO</span><span class="tag">科学智能体</span><span>收藏于 2026-11-17</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">66</span>《KV 前缀缓存》提示词按变化率分层，时间戳挪对位置 prefill 少算 90%</h3>
+  <p>提示词按变化率分层，稳定层放前、时间戳等易变字段放后，分层边界就是缓存边界；vLLM 按固定大小的 token 块做哈希，相同前缀的 KV 块直接复用。共享 2 万 token 前缀的两个请求，prefill 从 3 万与 3.2 万 token 降到 1 万与 1.2 万；时间戳放进第 1 块会让 2.2 万 token 的 prefill 全作废，挪到边界之后只剩约 2 千；约 66% 的 prefill 可以省掉。</p>
+  <div class="links">
+    <a class="cn" href="pages/kv-prompt-layering.html">中文精读 →</a>
+    <a class="en" href="https://kumarpratik.com/blog/design-llm-prompts-for-kv-cache-reuse">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">提示词工程</span><span>收藏于 2026-11-17</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
