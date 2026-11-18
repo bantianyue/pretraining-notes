@@ -798,6 +798,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度训练</span><span class="tag">并行策略（训练）</span><span class="tag">训练框架</span><span class="tag">MFU</span><span>收藏于 2026-11-17</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">70</span>《NVIDIA 稀疏注意力 GPU 共设计》索引器装进单块 Tensor Core 的八条指南</h3>
+  <p>稀疏注意力把长上下文成本从核心注意力搬进索引器：128K 下索引器与 Top-k 占 DeepSeek V3.2 单层 prefill 的 47%；八条硬件共设计指南让索引器、Top-k 与核心注意力都落在 GPU 的甜点上——G×(D+1) 装进约 200 行的单块 Tensor Core、KH=1 加交叉头规约、头维 128、FP16 epilogue、少打分、Top-k 融合、块级大块选择、大核心注意力组；FP16 epilogue 提速 1.31 倍、再加 FP16 累加到 1.45 倍，KH 从 1 到 8 时 decode 变慢 7.6 倍，Top-k 猜测复用快 2.1 至 2.4 倍。</p>
+  <div class="links">
+    <a class="cn" href="pages/sparse-attention-gpu-codesign.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.com/blog/co-designing-sparse-attention-for-efficient-long-context-inference/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">稀疏注意力</span><span class="tag">推理优化</span><span class="tag">GPU kernel</span><span class="tag">长上下文</span><span>收藏于 2026-11-18</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
