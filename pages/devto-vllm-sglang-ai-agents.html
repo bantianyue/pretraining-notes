@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 与 SGLang 跑 AI Agent 慢在哪：历史重算 55%，首 token 等 28.6 秒 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM 与 SGLang 跑 AI Agent 慢在哪：历史重算 55%，首 token 等 28.6 秒</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://dev.to/nahuel990/why-vllm-and-sglang-might-not-be-the-best-option-to-run-ai-agents-5ehb">https://dev.to/nahuel990/why-vllm-and-sglang-might-not-be-the-best-option-to-run-ai-agents-5ehb</a></div>
+<h1>vLLM 与 SGLang 跑 AI Agent 慢在哪：历史重算 55%，首 token 等 28.6 秒</h1>
+<ul>
+<li>原文：<a href="https://dev.to/nahuel990/why-vllm-and-sglang-might-not-be-the-best-option-to-run-ai-agents-5ehb">Why vLLM and SGLang Might Not Be the Best Option to Run AI Agents</a>（dev.to，作者 Nahuel，2026-11-11）</li>
+<li>主题：推理优化、Agent for Infra、KV 缓存、会话管理、vLLM、SGLang</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：聊天与批处理上 vLLM 与 SGLang 很快，AI Agent 是另一种负载——Agent 每回合把整段对话重发给模型，工具一跑、回来时上回合的 KV 很可能已被逐出显存，整段历史又要重算一遍；实测里 vLLM 与 SGLang 处理的 prompt token 中 51% 至 55% 是已经算过一次又被逐出的历史；把会话留在显存里、共享公共前缀、按容量准入新会话，重算压到 8% 至 16%，全程快 1.31 至 1.45 倍，首 token 快约 5 倍。</li>
+</ul>
+<h2>核心结论</h2>
+<p>一个编码 Agent 按回合工作：把整段对话发给模型，模型以一次工具调用作答（跑一条命令、改一个文件），Agent 执行工具，把结果追加进对话，再把整段对话发一遍。作者用的 trace 里，一次会话中位约 60 回合，增长到数万 token，每回合都重发之前全部内容。</p>
+<p>要回答一个回合，引擎需要整段历史的 KV 缓存。如果上回合的缓存还在 GPU 显存里，只用算新增 token；如果 Agent 跑工具期间缓存被逐出了，引擎要把整段历史再算一遍。两个引擎都有前缀缓存：早先请求的 block 留在显存里，下一个 prompt 开头相同就能复用。但它们不知道一个请求属于一个半秒后还会回来的 agent。</p>
+<p>vLLM 0.33.0 在聊天请求上接受 session_id，但它只用作 KV 缓存事件的元数据，没有钉住、没有存活时间，显存不够时 block 按最久未用优先逐出。SGLang 0.5.23 有真正的会话（/open_session、/close_session），但它的 OpenAI 兼容聊天接口只传 session_id，不传会话参数；让会话 KV 钉住的模式（--enable-streaming-session）默认关闭，需要走 /generate API；逐出默认按 LRU，另有 TLRU 等选项。负载一上来，一个 agent 等工具时，其他 agent 的请求会把它的历史挤出显存，它回来时，引擎要为那段历史再付一次钱。</p>
+<h2>测试方法</h2>
+<p>作者用 Rust 写了一个约 1700 行的小型服务引擎：每个 agent 的会话在回合之间留在 GPU 显存里，跨会话共享公共 prompt 开头（系统 prompt、工具定义），只在已运行会话仍放得下时才准入新会话。拿它跟 vLLM 与 SGLang 对比：</p>
+<ul>
+<li>工作负载：SWE-rebench-OpenHands 数据集里的 24 个真实编码 agent 会话（791 回合），同时跑。</li>
+<li>每个引擎的条件相同：Qwen3-8B、一块 NVIDIA L40S、相同的 KV 缓存大小（173,200 token）。</li>
+<li>工具时间：回合之间固定等待 0.5 秒、5 秒或 60 秒。实测编码 agent 工具调用的中位间隔约 0.42 秒，所以 0.5 秒是符合实际的那档。</li>
+<li>每个配置跑两次。每次跑之前先写下什么样的结果算通过。</li>
+</ul>
+<h2>结果：历史重算从 55% 压到 8–16%</h2>
+<p>工具等待 0.5 秒时，24 个会话的总耗时（越低越好）：</p>
+<table>
+<thead>
+<tr>
+<th>引擎</th>
+<th>第 1 次</th>
+<th>第 2 次</th>
+<th>历史重算</th>
+<th>首 token（中位）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>vLLM 0.33.0</td>
+<td>2264 秒</td>
+<td>2222 秒</td>
+<td>55%</td>
+<td>28.6 秒</td>
+</tr>
+<tr>
+<td>SGLang 0.5.23（LRU）</td>
+<td>2013 秒</td>
+<td>2048 秒</td>
+<td>51%</td>
+<td>35.0 秒</td>
+</tr>
+<tr>
+<td>SGLang 0.5.23（TLRU）</td>
+<td>2067 秒</td>
+<td>2024 秒</td>
+<td>52%</td>
+<td>36.3 秒</td>
+</tr>
+<tr>
+<td>Rust 会话引擎</td>
+<td>1506 秒</td>
+<td>1586 秒</td>
+<td>8–16%</td>
+<td>4.5 秒</td>
+</tr>
+</tbody>
+</table>
+<p>vLLM 与 SGLang 处理的 prompt token 里，一半以上是已经算过一次又被逐出的历史。把会话留在显存里，重算压到 8% 至 16%，整轮比 SGLang 快 1.31 倍、比 vLLM 快 1.45 倍，首 token 快约 5 倍。</p>
+<p>工具越慢，收益越小：</p>
+<table>
+<thead>
+<tr>
+<th>工具等待</th>
+<th>相对最优基线</th>
+<th>相对 vLLM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.5 秒</td>
+<td>快 1.31 倍</td>
+<td>快 1.45 倍</td>
+</tr>
+<tr>
+<td>5 秒</td>
+<td>快 1.13 倍</td>
+<td>快 1.24 倍</td>
+</tr>
+<tr>
+<td>60 秒</td>
+<td>基本相同</td>
+<td>基本相同</td>
+</tr>
+</tbody>
+</table>
+<p>60 秒等待时，同时需要 GPU 的 agent 很少，显存压力小，每个引擎表现基本相同。作者的引擎在那档首 token 也更慢。</p>
+<h2>这不意味着什么</h2>
+<ul>
+<li><strong>vLLM 与 SGLang 并不慢。</strong>逐 token 算，它们的解码比作者的引擎快：作者引擎的解码每 token 比 vLLM 慢 15% 至 21%。收益只来自不重算历史。</li>
+<li><strong>这个想法并不新。</strong>InferCept、Pensieve 与 Continuum 等已经提出过让 agent 的 KV 缓存在工具调用之间活着。作者加的是拿当前版本的两个引擎、在真实 agent trace 上做的实测。</li>
+<li><strong>这只是一套配置。</strong>一个模型、一块 GPU、一个负载级别、固定的工具等待。作者没测 CPU offload（LMCache、SGLang HiCache）与 SGLang 的流式会话，它们可能缩小一部分差距。</li>
+<li><strong>不是所有尝试都奏效。</strong>作者的三个钉住策略在 60 秒等待下输给了 vLLM。会话钉住太久会占住其他 agent 能用的显存。论文里列了全部策略。</li>
+</ul>
+<h2>要不要换引擎</h2>
+<p>可能还不到时候。作者的引擎是研究原型，正确的修法是让 vLLM 与 SGLang 学会 agent 会话，两边都有公开的相关提案。</p>
+<p>如果你在自己的 GPU 上跑很多 agent，查一下 prompt 流量里有多少是重算的历史。两个引擎都能按请求报告缓存的 token 数（vLLM 用 --enable-prompt-tokens-details，SGLang 用 --enable-cache-report）。如果像这次测试里一样超过一半，你就是在为同样的 token 付两次钱。</p>
+<p>代码与论文全部公开：引擎、回放客户端、原始结果与产出上面每个数字的脚本都在仓库里。</p>
+<ul>
+<li>代码：https://github.com/Nahuel990/agent-session-engine</li>
+<li>论文：When Does Keeping Agent Sessions in GPU Memory Pay Off? A Rust Serving Engine and a Replay Study on Real Agent Traces（在仓库的 paper/ 目录下）</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
