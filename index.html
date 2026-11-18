@@ -818,6 +818,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">GPU kernel</span><span class="tag">推理优化</span><span class="tag">注意力</span><span>收藏于 2026-11-18</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">72</span>《DeepSeek-V4.1 H200 PD 分离优化》六处改动，端到端延迟最多降 63.9%</h3>
+  <p>DeepSeek-V4.1-Flash 在 8 卡 H200 的 SGLang 1P1D 部署上，Indexer 一次前向占 209.47 毫秒（约 39%）；六处改动——打分宽度对齐（28,799 补到 28,800，微基准降约 40%）、只算候选位置（TTFT 降 22.9% 至 32.5%）、融合打分后处理（104.8 毫秒的后处理合进一个 Triton 核）、Prefill 块放大到 16K（TTFT 最高降 31.3%）、MoE 输出改 reduce-scatter（每 rank 通信时间降 19.4% 至 21.7%）、有界重放接 CP 与 DSpark（TTFT 降幅最高 46.7%）——让端到端延迟降 15% 至 64%，TTFT 降 41% 至 79%；代价是 TPOT 全线上涨 2.6% 至 51.9%，GSM8K 从 96.74% 降到 95.38%，原因未确认。</p>
+  <div class="links">
+    <a class="cn" href="pages/lmsys-deepseek-v41-h200-pd-optimization.html">中文精读 →</a>
+    <a class="en" href="https://www.lmsys.org/blog/2026-11-05-deepseek-v41-h200-pd-optimization">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">并行策略</span><span class="tag">GPU kernel</span><span class="tag">SGLang</span><span>收藏于 2026-11-18</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
