@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fuse-All MoE：一次 launch 算完写回，偏斜 prefill 从 2.3 倍压到 1.09 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Fuse-All MoE：一次 launch 算完写回，偏斜 prefill 从 2.3 倍压到 1.09 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2611.17857">https://arxiv.org/abs/2611.17857</a></div>
+<h1>Fuse-All MoE：一次 launch 算完写回，偏斜 prefill 从 2.3 倍压到 1.09 倍</h1>
+<ul>
+<li>原文：<a href="https://arxiv.org/abs/2611.17857">Fuse-All MoE: A Fused, Load-Balanced, Direct-Write Kernel for MoE Inference on TPUs</a>（arXiv:2611.17857，Meta SuperIntelligence Lab，2026-11-13 提交）</li>
+<li>主题：MoE 推理、GPU kernel（TPU）、并行策略（专家并行）、负载均衡、PD 分离、低精度量化（FP4）</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：MoE 推理在 TPU 上卡在两处——专家算完的中间结果要搬来搬去，路由偏斜又让少数设备拖住整层；Fuse-All MoE 把 token 收集、两次投影、门控激活与输出写回融进一次 Pallas 专家 launch，中间结果留在片上 VMEM、结果直写最终 token 槽位，偏斜 EP16 prefill 的核运行时间从均衡参考的 2.3 倍压到 1.09 倍，32 至 512 token 的 decode 上对称 EP8TP2 核延迟相对融合 EP16 最多降 21.3%，整栈服务吞吐相对 Megablox EP16 基线高 12% 至 34.5%。</li>
+</ul>
+<h2>核心结论</h2>
+<p>MoE 模型每 token 只激活一部分专家，参数容量可以做大，每 token 的计算量不按比例涨。但专家并行把专家分到各设备上之后，推理对路由把工作送到哪里很敏感：一个设备上活跃专家多，就能拖住整层。成本在 prefill 与 decode 之间会变：大 prefill 批次的权重复用多，但偏斜路由会把计算集中到少数设备；小 decode 批次上分摊权重读取与通信的工作更少，活跃专家数比分配到的 token 数更能决定成本。只均衡 token 数，可能让主要成本原地不动。</p>
+<p>Fuse-All MoE 的核心是一条输出契约：token 槽位目的地固定，生产者可以换。一次路由赋值是 (token，选中专家) 对，槽位是该 token 的 k 个选择中的位置；token t 的输出行是 local_token(t) × k + s，目的地是 floor(t / c)。重均衡改生产者不改目的地，直接写回因此能与负载均衡组合。融合省掉中间物化与收端重分布，负载管理省掉偏斜，两边都靠这条契约连在一起，路由选择与加权求和本身没有动。</p>
+<p>实测在 2×2×2 TPUv7 切片（8 芯片、16 个 TensorCore 设备）上：偏斜 EP16 prefill 的核运行时间从均衡参考的 2.3 倍压到 1.09 倍；32 至 512 token 的 decode 上，对称 EP8TP2 的核延迟相对融合 EP16 最多降 21.3%；整栈服务吞吐相对 Megablox EP16 基线高 12% 至 34.5%，含配套服务栈改动，不能单独归因到 MoE 核。数字要分三层读：专家核延迟、完整 MoE 层成本、整栈服务吞吐不是同一口径。</p>
+<h2>硬件：TPUv7 与并行单元</h2>
+<p>TPU7x（Ironwood）芯片向 JAX 暴露两个 TensorCore 设备，各有自己的 HBM 地址空间；chiplet 之间走 die-to-die 链路，物理芯片之间用片间互联 ICI。一个 rank 指一个 EP 设备：基础 EP16 配置跨 8 芯片上的 16 个设备。每个 TensorCore 含一个矩阵单元 MXU、一个向量处理单元 VPU 与标量控制；TPU7x 的 MXU 是 256×256 脉动阵列。VMEM 存向量 tile 与中间结果，SMEM 存标量元数据；SparseCore 有单独的不规则访问硬件与内存。</p>
+<table>
+<thead>
+<tr>
+<th>资源</th>
+<th>规格</th>
+<th>推论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TensorCore / SparseCore</td>
+<td>每芯片 2 / 4</td>
+<td>EP 设备数与物理芯片数不同</td>
+</tr>
+<tr>
+<td>VMEM</td>
+<td>每 TensorCore 64 MiB</td>
+<td>权重、中间结果与 DMA 暂存争容量</td>
+</tr>
+<tr>
+<td>HBM</td>
+<td>192 GiB，约 7.38 TB/s</td>
+<td>按芯片级字节与芯片级峰值吞吐统一算</td>
+</tr>
+<tr>
+<td>稠密算力</td>
+<td>2,307 TFLOPs/s BF16；4,614 TFLOPs/s FP8</td>
+<td>roofline 必须匹配实际用的算术模式</td>
+</tr>
+<tr>
+<td>ICI</td>
+<td>每芯片双向 1,200 GB/s</td>
+<td>这是聚合带宽，不是每目的地的保证</td>
+</tr>
+<tr>
+<td>片内链路</td>
+<td>文档称 6 倍于一维 ICI 链路</td>
+<td>chipmate 间权重传输避开片间环形流量</td>
+</tr>
+</tbody>
+</table>
+<p>Pallas 表达 Mosaic 编译成静态调度 TPU 程序的 tile 核；Fuse-All MoE 在使用前显式发出本地与远程 DMA，并在完成信号量上等待。JAX Megablox 提供公开的 Pallas 分组 matmul 实现。激活与输出用行主导的 token 行轴、向量尺寸的尾部维；权重沿 K 每 32 位字打包 8 个 FP4 值。逻辑矩阵、打包存储与 MXU tile 是三种不同表示；打包不决定算术精度。</p>
+<p>对 token t，记 e(t,s) 为槽位 s 的专家，aₜ,ₛ 为路由权重。标准 SiLU 或 GELU 门控专家：先算门控激活 hₑ(x) = act(xW 门,ₑ) × (xW 上,ₑ)，再算 zₑ(x) = hₑ(x)W₂,ₑ，最后 yₜ = Σₛ aₜ,ₛ · zₑ₍ₜ,ₛ₎(xₜ)。路由例子：T=4、E=4、P=2、k=2，rank 0 拥有 A/B，rank 1 拥有 C/D；token 0 至 3 分别选 [A,C]、[B,C]、[A,D]、[B,D]。token 2 槽位 0 的 A 结果回到 rank 1 的第 0 行；token 0 槽位 1 的 C 结果回到 rank 0 的第 1 行。专家排序改计算顺序，不改目的地。</p>
+<p>基线用 Megablox 分组矩阵乘核在同一 2×2×2 切片上做 EP16 专家计算，不用融合的算完即回传核。完整层对比含路由、激活、交换与组合；权重格式、激活量化、专家归一化、路由与输出语义必须匹配。</p>
+<h2>融合核：五阶段流水线</h2>
+<p>每个设备消费激活、专家权重、行数、token 下标与输出目的地，每路由赋值产出一行。五个阶段：</p>
+<ol>
+<li>收集 token 行：索引式行 DMA 把输入直接从 HBM 收到 VMEM，避开 HBM 里一份按专家排过序的激活张量。</li>
+<li>门/上投影 matmul：核解包 W1、应用缩放、一起算门向量与上向量。</li>
+<li>门控激活：标准 act(门) × 上操作直写下投影的 VMEM 输入，去掉单独的激活核与一次中间拷贝。</li>
+<li>下投影 matmul：乘 W2 得到隐藏宽度的结果，暂存等输出 DMA，后面的 tile 继续算。</li>
+<li>直接写回：本地或远程 DMA 把每行结果写到最终 token 槽位行，去掉辅助接收存储与收端散射加和重分布。</li>
+</ol>
+<p>每个设备的输出缓冲含 c×k 行，每 token 槽位一行。传输只写行，不像常规 reduce-scatter 那样求和。单独的后处理转 FP32、组合路由加权结果、再转到请求的 dtype。RMS 归一化专家块的缩放与归一化在求和之前：u[t,s] = (1 + norm_weight) × z[t,s]，v[t,s] = u[t,s] / sqrt(mean(u[t,s]²) + 1e-8)，y[t] = Σₛ a[t,s] × v[t,s]。加权求和的 RMSNorm 不等价于这种每专家归一化。</p>
+<table>
+<thead>
+<tr>
+<th>边界或存储</th>
+<th>融合路径</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>分组激活物化</td>
+<td>去掉：token 收集直接进 VMEM</td>
+</tr>
+<tr>
+<td>门/上投影 matmul、激活、下投影 matmul 的 HBM 中间结果</td>
+<td>在融合专家计算路径内去掉</td>
+</tr>
+<tr>
+<td>辅助接收-散射缓冲</td>
+<td>去掉：写操作直达最终 token 槽位地址</td>
+</tr>
+<tr>
+<td>最终专家槽位输出</td>
+<td>保留：主 HBM 输出路径在后处理前物化它</td>
+</tr>
+<tr>
+<td>路由准备与上游激活交换</td>
+<td>在这次融合 launch 之外；全层测量要计入成本</td>
+</tr>
+<tr>
+<td>加权求和与每专家输出归一化</td>
+<td>在这次 launch 之外，由 Pallas 后处理核或 JAX 路径实现</td>
+</tr>
+</tbody>
+</table>
+<p>权重用 FP4 e2m1，沿 K 每 uint32 字打包 8 个值，重解释即可，不用复制权重。FP32 块缩放形状是 [专家，K 块数，1，N]，每组 K 个值一个缩放；每个专家的门、上或下投影各有一个单独的全局缩放。块宽从缩放形状按 2 的幂策略恢复，尾部块随权重一起补齐；块宽影响缩放与 tile 选择，报告权重格式时必须一起报告。W4A8 用 8 位激活，W4A16 用 BF16。K=4096 时，兼容的 256/512 宽块在两种模式下都后缩放，128 宽块预缩放。</p>
+<p>量化块 matmul 要 FP32 结果，但在 BF16 输出的 FP4 路径里转成 BF16 共享累加器；块缩放、求和、全局缩放、激活与存储的中间结果因此不是全程 FP32。BF16 累加相对 FP32，8192 列累加器每行省 16 KiB，窄 N tile 省得少。一个外部 K tile 可含多次转换累加步骤；层级与模型级精度验证因此很关键，尤其长 K 或多个外部 K tile。全局缩放在每投影最后 K tile 之后应用，门列与上列分开。</p>
+<p>外层循环处理最多 tₘ 行的专家 tile，含对齐补齐。每轮迭代把下一输入收集与权重预取、当前计算与输出写回流水线起来；专家身份与权重缓冲容量决定复用。同一专家连续 tile 命中时跳过权重传输与等待；标量发出与晚到传输仍可能暴露。L 个连续输入 tile、打包专家尺寸 Bₑ（不含缩放）时：无复用要 L × Bₑ 字节，全驻留只要 Bₑ 字节。两个投影都驻留时，L=16 让这轮权重读取少 16 倍，不是整层流量都少；激活、输出、缩放与通信还在。例子用 16 MiB 打包 W1、8 MiB W2、块宽 512 时 0.375 MiB FP32 缩放。</p>
+<p>一个门控专家约做 6 × rₑ × d × f 次 matmul FLOPs，存 3 × d × f / 2 打包权重字节（不含缩放）。一次加载的纯权重强度接近 4 × rₑ FLOPs/byte；每 tile 重载只按 tile 行数分摊。T=8192、k=8、E=256 时，全局 65,536 个赋值：均衡路由下每专家 256 行，每 EP16 rank 4096 行；偏斜与对齐决定实际组长度与 tile 数。</p>
+<table>
+<thead>
+<tr>
+<th>缓冲</th>
+<th>数量</th>
+<th>生命周期或用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>收集的输入行</td>
+<td>2 个 tile</td>
+<td>当前计算与下一 tile 的 token 收集用不同槽位</td>
+</tr>
+<tr>
+<td>W1 与块缩放</td>
+<td>环形权重缓冲</td>
+<td>当前专家消费、跨 tile 预取与有条件驻留</td>
+</tr>
+<tr>
+<td>W2 与块缩放</td>
+<td>调好的环</td>
+<td>发得够早，能与 token 收集、门/上投影 matmul 重叠；重复专家命中跳过加载</td>
+</tr>
+<tr>
+<td>激活中间结果</td>
+<td>1 个 tile</td>
+<td>由门/上投影 matmul 的激活写出，由下投影 matmul 消费</td>
+</tr>
+<tr>
+<td>共享累加器/下投影 matmul tile</td>
+<td>共享暂存/1 个输出 tile</td>
+<td>进临时发送缓冲前的计算与转换</td>
+</tr>
+<tr>
+<td>临时发送缓冲</td>
+<td>3 个 tile</td>
+<td>行保持稳定，直到本地/远程源 DMA 完成</td>
+</tr>
+<tr>
+<td>输出目的地元数据</td>
+<td>2 个有界 SMEM 数组</td>
+<td>活动窗口的目的地 rank 与输出行下标</td>
+</tr>
+</tbody>
+</table>
+<p>同步分四步：入口就绪（每 rank 完成零填充并发信号；等待发生在 tile 0 首次远程活动之前，与初始计算重叠）、源生命周期（发送缓冲复用等待记录的本地拷贝与远程发送完成，再清零计数；源完成不等于接收端全局完成）、尾部完成（退出时排空输出暂存；没有计算的 rank 也做入口等待）、接收完成与退出（本地排空后过 EP 屏障，每 rank 再排空期望的接收完成，然后才暴露输出）。循环里没有周期性跨 rank 屏障，但保留输入、权重、元数据与缓冲复用等待。</p>
+<p>完整 int32 目的地与输出行数组要占 8×M 字节 SMEM；改用 HBM 里 1024 条目的 slab，每 tile 加载与基址相对的 slab 对齐 SMEM 窗口。64 至 512 行的 tile、足够长的输入每数组用两个 slab：2048 条目即 8 KiB，合计 16 KiB SMEM。token 下标仍约占 4×M 字节；top-8 下 32,768 全局 token 要 262,144 个下标，即 1 MiB，还没算其他元数据。固定 tile 配置下只有目的地窗口是有界的。</p>
+<h2>负载不均：四招对付偏斜路由</h2>
+<p>基础核去掉中间流量，但本身不均衡工作。负载不均通过 tile 调度、执行安放与通信顺序处理，同时保留路由的专家选择与输出契约。PD 分离下，评测的服务配置选 EP16 做 prefill（T 不小于 1024），对称 EP8TP2 做 decode（T 不大于 512）。这种分阶段版式选择只适用于 PD，不是 colocated prefill 与 decode 的通用按 token 数切换策略。</p>
+<p><strong>行分桶</strong>：核选能盖住 tile 有效行与前导对齐补齐的最小预编译行分桶，避免每个 tile 都按满高算。41 个有效行、偏移 8 时，需要的范围是 49；64 行主体算 8 个前导与 15 个尾部补齐行，跳过 128 行分配的一半。分桶减少但不消除补齐。实现把分桶数 × 行成本因子（量化配置） × tₘ 封顶在 768，超了回退满高计算。一次实验在约 66K 至 70K bundle 附近跨过指令覆盖阈值，触发循环内代码重载；这是编译器与形状相关的观察，需要重新测量。</p>
+<p><strong>热/非热交错</strong>：最忙（热）专家 tile 与其他专家 tile 交替，用更长的热专家计算隐藏短命专家的权重加载。稳定合并保持每流顺序，不匹配的 tile 留在尾部。调度用各设备上最忙专家负载除以该设备平均专家负载的最大值；计数排除无效路由，先于 chipmate 重分布。单独的 VMEM bank 留住热 W1 权重，其他专家每次返回都重载；W2 也可能在专家切换时重载。</p>
+<p><strong>chipmate 重分布</strong>：chipmate 是低成本重均衡目标。移动一个专家的工作把权重拷进接收方 HBM，改一次调用的 tile 调度，不是永久归属；输入已经复制，不用额外 token 交换。复制的有效行计数与拓扑图决定每物理芯片的一对 TensorCore 设备每次调用最多移动一个专家，不用规划集合通信；不同合格对可以并发移动。发送方去掉选中的 tile，接收方追加；移动必须改善选定的负载估计。大 prefill 批次的规划器选降低 pair 最大行负载的移动；小批次规划按活跃专家数估计权重成本。例子：移动一个四行专家把示例负载从 24/12 改为 20/16，但仍传输完整 W1/W2 与缩放（24 MiB 打包权重，不含缩放）。移动 tile 不改 token 槽位目的地，但改本地/远程分类与接收计数；权重传输只在入口就绪后开始、退出时排空。</p>
+<p><strong>目的地交错</strong>：专家主导、全局 token 顺序在连续 token 归属下会对一个目的地产生突发。把每专家内按 (local_token × P + destination) × k + slot 排序鼓励交错，同时保留专家分组与原始 token 槽位身份；这里 P 是 EP rank（TensorCore 设备）数，不是物理芯片数。同一个负载偏斜判定控制全部专家组的目的地交错与热专家 tile 轮换。非连续目的地要求每行 DMA 单发，拿地址工作换更低的突发流量。</p>
+<p><strong>静态安放与预加载副本</strong>：chipmate 移动改不了一块芯片的总负载。静态安放用观测到的专家负载，在分发前一致地置换路由检查点列与专家权重，保持每设备固定的专家槽位数；每专家只分配一次。跨芯片设计每芯片预留一个额外专家槽；模型权重加载时，校准计数识别热专家、拷到其他芯片上。每芯片一个副本把新增 HBM 容量限制在一个专家以内（含缩放）；只帮有预置副本的专家，不把单个专家拆到两个芯片。运行时，复制的路由计数决定复制专家在 home 芯片还是持有方执行；选中专家的路由工作整批移动，token 槽位目的地不变。跨芯片服务在 decode/验证形状上实现到 512 token，默认关闭；把同一预加载副本机制用于 prefill 是扩展，不是当前评测的结果。</p>
+<p><strong>对称 EP8TP2 decode</strong>：decode 成本可能由活跃专家数与权重 tile 数主导，即使每专家只收到少数 token。EP8×TP2 在芯片内共享每个芯片拥有的专家：W1 按匹配的门/上通道分区，W2 按规约维分区；两核用互补权重半边算同一输入行，调用期间不迁移权重。对称调度让两核用相同有效行界与行分桶选择算同一 tile；tile t 的规约推迟到下一轮，让部分交换与后续计算重叠。两核收集首 tile 之后，后续输入收集在两核间交替；片上桥把每收集 tile 转发给对端。每核保留自己有效行一半的输出部分，发送另一半，再把收到的贡献加到自己拥有的行上，写回原始 token 槽位目的地；每路由行因此只有一个最终写者。TP 部分留在 VMEM，用片上桥而不用 HBM 中间结果或单独的 TP 规约 launch。评测的对称 EP8TP2 路径接受 FP4 权重与 BF16 输入，最多 512 全局输入 token，token 数能被参与设备数整除。</p>
+<h2>实测：偏斜 prefill 从 2.3 倍压到 1.09 倍</h2>
+<p>评测用 TPUv7（Ironwood）2×2×2 切片，8 芯片、16 个 TensorCore 设备。FP4 模型 256 个专家，top-8 路由，宽度 d=f=4096；EP16 每设备 16 个专家，EP8TP2 每芯片 32 个专家、在两设备间分区。Megablox 版 EP16 实现是报告的服务对比基线；decode 核操作结果拿对称 EP8TP2 对融合 EP16 核比。</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>取值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>隐藏/中间宽度</td>
+<td>4096 / 4096</td>
+</tr>
+<tr>
+<td>专家数/top-k</td>
+<td>256 / 8</td>
+</tr>
+<tr>
+<td>硬件切片</td>
+<td>TPUv7（Ironwood），2×2×2 物理芯片</td>
+</tr>
+<tr>
+<td>EP16 设备数/每设备专家数</td>
+<td>16 / 16</td>
+</tr>
+<tr>
+<td>每专家 W1/W2 形状</td>
+<td>4096×8192 / 4096×4096</td>
+</tr>
+<tr>
+<td>每专家打包后 W1/W2 字节</td>
+<td>16 MiB / 8 MiB，不含缩放</td>
+</tr>
+<tr>
+<td>T 个 token 时的赋值数</td>
+<td>全局 M = 8T；均衡路由下每 rank 均值 M/P</td>
+</tr>
+<tr>
+<td>算术配置</td>
+<td>FP4 块缩放权重；W4A8 或 W4A16 须明确报告</td>
+</tr>
+</tbody>
+</table>
+<p>专家 launch、完整 MoE 层与服务计时分开报告；完整层计时含准备、交换与组合，区分含/不含预处理的成本。预编译并预热形状，同步异步完成，匹配输入/路由与拓扑，报告重复次数与波动。均匀路由给的是界，不是有代表性的偏斜。</p>
+<ul>
+<li>测到的偏斜 prefill 负载上，负载管理把核运行时间从均衡核参考时间的 <strong>2.3 倍</strong>压到 <strong>1.09 倍</strong>；两个比值用同一固定均衡负载核时间。</li>
+<li>decode token 数从 32 到 512，对称 EP8TP2 相对融合 EP16 核的核操作延迟最多降 <strong>21.3%</strong>；这次核操作对比与 Megablox 整栈服务结果是不同口径。</li>
+<li>相对同一 2×2×2 切片上的 Megablox 版 EP16 基线，整栈服务吞吐在不同请求组合与批次大小下高 <strong>12% 至 34.5%</strong>；这些收益含服务栈改动，不能单独归因到 MoE 核。</li>
+</ul>
+<p>消融分析：T 个有效全局 token、top-k 路由、宽度 d 与 f 时，三个专家投影做 Fₑ = 6·T·k·d·f 次 FLOPs；发出的 matmul 工作还反映行与宽度补齐，量化与激活的向量工作另计。活跃专家 A 个、每打包 FP4 权重读一次时，纯权重算术强度 Iₑ = 4·T·k/A FLOPs/byte；这个乐观强度不含缩放、激活、元数据、输出流量与权重重载。</p>
+<table>
+<thead>
+<tr>
+<th>全局 token 数</th>
+<th>有效投影 GFLOPs</th>
+<th>纯权重 FLOPs/byte</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>32</td>
+<td>25.8</td>
+<td>4</td>
+</tr>
+<tr>
+<td>128</td>
+<td>103.1</td>
+<td>16</td>
+</tr>
+<tr>
+<td>512</td>
+<td>412.3</td>
+<td>64</td>
+</tr>
+<tr>
+<td>2048</td>
+<td>1649.3</td>
+<td>256</td>
+</tr>
+<tr>
+<td>8192</td>
+<td>6597.1</td>
+<td>1024</td>
+</tr>
+</tbody>
+</table>
+<p>每活跃专家行数少时，每 FLOPs 的权重复用少；行分桶补齐与固定元数据、DMA 发出、同步成本可能主导有效计算。token 数固定时，激活更多专家可能增加权重流量而不增加有效 FLOPs；活跃专家数、发出/有效行比与最慢 rank 因此是比 token 数更互补的延迟预测量。每专家行数多时，权重面板在行 tile 间驻留能分摊权重流量；选定的面板集装不进缓冲，或执行顺序打破复用，重复加载会限制这部分收益。token 数高因此不保证算力受限执行：输出流量、暴露的暂存等待与最慢芯片的偏斜仍可能决定运行时间。</p>
+<p>消融实验是进一步验证，不是已完成结果，汇总结果没有分离每个调度与通信机制：融合边界（测专家 launch 与完整层延迟，从编译 trace 拿基线 launch 与物化字节）、权重复用（行顺序与 tile 形状固定，保留或重载权重）、暂存深度（在匹配的内存预算下比较两个与三个发送缓冲）、直接写回发出（在目的地排序 tile 上比较通用与有序发出，再单独评交错）、行特化（在相同路由上比较分桶与满行主体）、负载管理（分离静态安放、热/非热轮换与 chipmate 重均衡）、预加载专家副本（在相同路由与固定校准画像下比较每芯片零副本与一副本）、精度与容量（比较 FP8/BF16 激活配 FP4 权重、累加器精度与精度）。</p>
+<p>模型质量：全部生产评测通过，没有观察到数值问题；这是生产验收，不是不同算术或规约路径之间的逐位等价。详细评测套件设置与数值误差小结仍待记录。报告的生产使用需要一份上线记录，写明模型覆盖、数值/调度设置、集成边界与监控的正确性/性能信号。</p>
+<h2>局限与后续工作</h2>
+<p>融合去掉中间 HBM 流量，路由身份与独立的源/目的地完成让流水线安全；预加载副本与对称 TP2 在不同层级处理不均。标量开销、补齐与最慢芯片尾部仍是测量重点。消费者导向的上游交换可以只把 token 发给拥有选中专家的 rank，并去重本地使用；节省取决于不同远程消费者数，top-8 路由下可能很多。每前向 token 缓存需要调用隔离与收集前就绪；中继路由需要拓扑感知的字节/跳数与争用分析；两者都不是已确立的 FP4 核能力。</p>
+<p>预加载副本只覆盖固定的热专家集。扩展跨芯片安放到 prefill 需要计算感知的目标与服务集成；后续工作包括随路由变化调整副本安放、支持多持有方、拆分占主导的专家；这些扩展必须保持唯一的 token 槽位生产者与跨调用的安全权重、输出生命周期。进一步机会包括混合精度 lowering、更准的内存预算累加、指令感知特化与有代表性的路由调优；生成指令与 DMA 发出可见性会改善可复现性；目标仍是验证过的层级权衡。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
