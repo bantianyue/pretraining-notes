@@ -808,6 +808,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">稀疏注意力</span><span class="tag">推理优化</span><span class="tag">GPU kernel</span><span class="tag">长上下文</span><span>收藏于 2026-11-18</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">71</span>《ZYFA：MI355X 上的 FP8 注意力》lean P + 双波乒乓 + 逐块放缩，实测提速 1.76 倍</h3>
+  <p>FP8 注意力在 MI355X 上卡的不是矩阵管线，是夹在两次矩阵乘之间的 softmax：FP8 下向量管线需要矩阵管线 0.94 倍的周期，硬件不跟踪 MFMA 完成，e4m3 概率还会下溢；三招对应破解——lean P 用 FP8 码值近似对数、一次乘加代替 14 周期指数，双波乒乓调度让矩阵波与 softmax 波交替过屏障、矩阵管线忙碌率 60% 升到 86%，逐块放缩加舍入行和归一化；实测激活 FP8 吞吐为 AITER 的 1.16 至 1.76 倍，误差反而低 62% 至 78%；时钟随操作数切换的位变化，随机输入吞吐不能预测真实激活。</p>
+  <div class="links">
+    <a class="cn" href="pages/zyfa-fp8-attention-mi355x.html">中文精读 →</a>
+    <a class="en" href="https://www.zyphra.com/our-work/zyfa">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">GPU kernel</span><span class="tag">推理优化</span><span class="tag">注意力</span><span>收藏于 2026-11-18</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
