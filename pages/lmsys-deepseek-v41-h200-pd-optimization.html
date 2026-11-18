@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek-V4.1 H200 PD分离优化：六处改动，端到端延迟最多降 63.9% · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>DeepSeek-V4.1 H200 PD分离优化：六处改动，端到端延迟最多降 63.9%</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-05-deepseek-v41-h200-pd-optimization">https://www.lmsys.org/blog/2026-11-05-deepseek-v41-h200-pd-optimization</a></div>
+<h1>DeepSeek-V4.1 H200 PD 分离优化：六处改动，端到端延迟最多降 63.9%</h1>
+<ul>
+<li>原文：<a href="https://www.lmsys.org/blog/2026-11-05-deepseek-v41-h200-pd-optimization">Optimizing DeepSeek-V4.1 on H200 with SGLang PD Disaggregation</a>（LMSYS 博客，2026-11-05）</li>
+<li>主题：推理优化、并行策略（PD 分离）、GPU kernel、SGLang、MoE、投机解码</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：DeepSeek-V4.1-Flash 在 8 卡 H200 的 SGLang 1P1D 部署上，Indexer 一次前向占 209.47 毫秒（约 39%）；六处改动——打分宽度对齐、只算候选位置、融合打分后处理、Prefill 块放大到 16K、MoE 输出改 reduce-scatter、有界重放接 CP 与 DSpark——让端到端延迟降 15% 至 64%，TTFT 降 41% 至 79%，代价是 TPOT 全线上涨 2.6% 至 51.9%，GSM8K 从 96.74% 降到 95.38%。</li>
+</ul>
+<h2>核心结论</h2>
+<p>部署是 8 卡 H200 上的 SGLang 1P1D 配置：Prefill 占 4 卡（TP4/CP4/EP4），Decode 占 4 卡（TP4/DP4/EP4）。瓶颈先出现在 Prefill 侧：并发不高时请求已经在 Prefill 队列里积压，Decode 侧的可用缓存容量解释不了排队。一次代表性早期画像里，Indexer 占 209.47 毫秒，约占单次前向拆解的 39.06%；MoE 计算与 NCCL 各占约 18%。</p>
+<p>六处改动各啃一块成本，都有独立的基准对照，百分比不能跨行相加：</p>
+<table>
+<thead>
+<tr>
+<th>改动</th>
+<th>啃掉的成本</th>
+<th>收益</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>打分宽度对齐</td>
+<td>GEMM 的物理形状</td>
+<td>微基准打分延迟降约 40%</td>
+</tr>
+<tr>
+<td>只算候选位置</td>
+<td>打分的键集合</td>
+<td>端到端降幅最高 22.1%</td>
+</tr>
+<tr>
+<td>融合打分后处理</td>
+<td>打分后的访存流量</td>
+<td>端到端降幅最高 18.2%</td>
+</tr>
+<tr>
+<td>Prefill 块 8K → 16K</td>
+<td>调度轮数</td>
+<td>TTFT 最高降 31.3%</td>
+</tr>
+<tr>
+<td>MoE 输出改 reduce-scatter</td>
+<td>MoE 输出归属</td>
+<td>每 rank 通信时间降 19.4% 至 21.7%</td>
+</tr>
+<tr>
+<td>有界重放接 CP 与 DSpark</td>
+<td>后 19 层算多少 token</td>
+<td>TTFT 降幅最高 46.7%</td>
+</tr>
+</tbody>
+</table>
+<p>合并之后，8 组缓存命中率与并发组合里端到端延迟降 15% 至 64%，TTFT 降 41% 至 79%，最大端到端降幅 63.9%（70% 命中、并发 16，基线/合并延迟比 2.77），最大 TTFT 降幅 79.0%（90% 命中、并发 32）。代价在生成侧：TPOT 在 8 组工况里全部上涨 2.6% 至 51.9%，GSM8K 从 96.74% 降到 95.38%，低 1.36 个百分点，原因没有确认，有界重放的边界近似是头号嫌疑。</p>
+<h2>测量口径</h2>
+<p>输入名义上是 65,536 token，输出 512 token；缓存命中率标签 50%、70%、90% 对应共享前缀 32,768、46,080、61,440 token，并发分别是 4 与 8、8 与 16、8、16、24 与 32。每个工况跑三次，每次 512 个请求加 10 个热身请求；TTFT、TPOT、E2E 取三次运行均值的均值与样本标准差（ddof=1）。优化前基线测在开发起点 commit d0a7565，滑动窗口有界重放关闭，两个 Prefill token 上限都是 8,192。基线 GSM8K 是 1,319 道单样本题，96.74%。</p>
+<p>第 1 至 3 节从共同起点独立评各自改动；第 4 节在三处 Indexer 改动合并的基础上评大块；第 5 与第 6 节各自在第 1 至 4 节的基础上再加一处。有些表的逐次 SGLang 版本记录没有保留，复现时以各节开头的基线与优化配置为准。</p>
+<h2>模型机理：Indexer、共享候选与有界重放</h2>
+<p>DeepSeek-V4.1 把 128 位置滑动窗口与稀疏访问压缩历史结合：部分源层产出压缩 KV 与 Indexer 键，消费者复用最新源层存下的历史，同时维护自己的局部窗口 KV。最后一个压缩 KV 源层是第 20 层，第 21 至 39 层不用再产出新的压缩表示就能读这段历史。</p>
+<p>Indexer 决定注意力读哪些压缩历史位置。BF16 路径上，Indexer 对每个头算查询与键的点积，过 ReLU 与查询相关的头权重，再沿头求和，最后做 top-k 选择。第 20 层最多发布 2,048 个候选块，每块 8 个压缩位置，同时从全部可见位置里给自己选 top-512。后面的 Indexer 源层共享这些候选块 ID，在这个域里算自己的分数与最终 top-k，不复制发布者的分数与最终 top-k。没有自己 Indexer 的层复用最近一次选择。</p>
+<p>有界重放利用固定的后层压缩历史，把第 21 至 39 层的 Prefill 计算限制在每请求尾部窗口：整块提示词先过第 0 至 20 层，后 19 层最多只执行每请求最后 128 token；128 是配置的滑动窗口长度，不是 CP 分区大小，也不是 Indexer 的 top-k 预算。DSpark 是推测式块起草器，用目标模型选定层的隐藏状态填充草稿 KV 状态并约束提案。</p>
+<h2>第一招：把 BF16 打分宽度补齐到 64 的倍数</h2>
+<p>相邻的 Indexer 打分宽度，GEMM 代价可能差很多：跨 rank 画像显示，64 对齐的宽度比相邻未对齐宽度快得多。打分操作的大中间张量形状是 [查询行，头数，可见键数]，把物理键范围补齐能改善 GEMM 形状，多算的算术量很小：多一列就把宽度 28,799 变成 28,800，即 64 的倍数。</p>
+<p>CUDA BF16 键、可见位置不少于 1,024 时，改动把反量化后的键张量补齐到 ceil(可见键数 / 64) × 64，每个请求只做一次，查询块之间复用。分数在因果掩码与 top-k 选择之前切回逻辑范围；块大小计算用补齐后的宽度，现有中间显存预算不变。</p>
+<table>
+<thead>
+<tr>
+<th>查询行数</th>
+<th>逻辑打分宽度</th>
+<th>基线</th>
+<th>对齐后</th>
+<th>降幅</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>582</td>
+<td>28,799</td>
+<td>4.113 ms</td>
+<td>2.462 ms</td>
+<td>40.1%</td>
+</tr>
+<tr>
+<td>292</td>
+<td>57,343</td>
+<td>4.088 ms</td>
+<td>2.472 ms</td>
+<td>39.5%</td>
+</tr>
+<tr>
+<td>582</td>
+<td>28,800</td>
+<td>2.443 ms</td>
+<td>2.445 ms</td>
+<td>基本不变</td>
+</tr>
+</tbody>
+</table>
+<p>服务基准里，8 个工况 TTFT 降 12.3% 至 18.2%，E2E 降 4.4% 至 14.8%。50% 缓存命中、并发 4 时，TTFT 从 6,245 毫秒降到 5,108 毫秒，E2E 从 7,402 毫秒降到 6,327 毫秒。CP rank 0 的 trace 在同一逻辑形状下对比，打分核耗时从 1.88 毫秒降到 362 微秒。GSM8K 保持 96.74%。</p>
+<h2>第二招：只给候选位置打分</h2>
+<p>原来的 Torch 消费者先给全部可见键打分，再收集候选分数；永远选不上的位置白白消耗 GEMM 算力与中间显存带宽。改动把限制移到打分之前：Triton 核用块 ID 直接加载对应的键，产出宽为 C 而非完整可见宽度 L 的紧凑逐头打分张量。ReLU、头加权与头归约保留原操作；因果掩码与无效候选掩码在 top-k 之前作用于紧凑分数。</p>
+<p>小例子：16 个逻辑压缩 Indexer 键位置，编号 0 至 15，发布者给出块 [1, 3]，示例块大小取 4，模型实际用 8。消费者已经被限制在 [4…7, 12…15]；旧实现每头算 16 个分数再收集其中 8 个，新实现直接算 8 个合格分数。紧凑 top-k 选中第 5 列时，候选列表下标是 5 // 4 = 1，对应已发布块 3，块内偏移是 5 % 4 = 1，逻辑键位置因此是 3 × 4 + 1 = 13，再按请求的映射从逻辑键位置 13 落到物理 KV 槽。把紧凑第 5 列当成键位置 5 会选错历史。</p>
+<p>优化路径要求 CUDA BF16 操作数、头维 128、头数不多于 64、候选宽度不大于可见键长度的一半；更宽的候选集走原路径。服务基准显示 TTFT 降 22.9% 至 32.5%，E2E 降 8.3% 至 22.1%。70% 命中、并发 8 时，TTFT 从 8,061 毫秒降到 5,944 毫秒，E2E 从 9,228 毫秒降到 7,191 毫秒；90% 命中、并发 16 时，TTFT 从 2,846 毫秒降到 1,922 毫秒，降 32.5%。CP rank 0 打分核耗时从 1.88 毫秒降到 1.147 毫秒。本地验证报告：测试过的模型风格 FP4 输入上分数与 top-k 完全一致，GSM8K 保持 96.74%。</p>
+<h2>第三招：把打分后处理融进一个 Triton 核</h2>
+<p>原来的顺序先物化大块 BF16 逐头分数，再过 ReLU、乘头权重、沿头归约、转 FP32。分开的元素操作反复读写 [查询行，头数，上下文] 张量；画像把约 104.8 毫秒的单次代表性前向归于乘法、截断/ReLU 与归约操作。改动保留原来的打分 GEMM，把后面的 epilogue 换成一个 Triton 核，走支持的 32 头 CUDA BF16 路径；GEMM 的逐头输出还在，后面的全尺寸中间张量消失。</p>
+<p>数值行为关键，因为 top-k 直接消费这些分数：两个几乎打平的键在选择阈值附近会因为微小舍入变化互换顺序，改变注意力读哪些 KV 条目。核在乘法与归约之后保留 BF16 舍入，用 4 个交错累加器复现测试过的 Torch/CUDA 32 头累加顺序。最后转 FP32 恢复不了更早一次 BF16 转换已丢的精度；公式相同，改了舍入点或求和顺序就可能改变选择。上下文相关的行步长与头步长仍是运行时参数，不给每个上下文相关步长单独特化核；不支持的设备、数据类型、头数、宽度与版式走 Torch 回退。</p>
+<p>服务基准显示 TTFT 降 19.8% 至 25.8%，E2E 降 4.3% 至 18.2%。50% 命中、并发 4 时，TTFT 从 6,245 毫秒降到 4,850 毫秒，E2E 从 7,402 毫秒降到 6,099 毫秒。选中的 CP rank 0 trace 区间覆盖 GEMM 与打分后处理，从 4.243 毫秒降到 2.26 毫秒。GSM8K 是 96.59%，基线两次运行分别是 96.74% 与 96.36%。</p>
+<p>三处改动能不能叠加由调用路径决定：对齐与融合可在符合条件的稠密路径上叠加；候选打分替换稠密 GEMM，核查的实现不调融合 epilogue。把第 1 至 3 节的优化一起 cherry-pick 到 commit d0a7565 上，用 8K Prefill 块评合并配置：相对共同早期基线，TTFT 降 29.7% 至 46.3%，E2E 降 9.5% 至 34.5%，TPOT 涨 8.1% 至 20.6%。这组合并配置是第 4 节的基线。</p>
+<h2>第四招：Prefill 块从 8K 放大到 16K</h2>
+<p>8,192 token 的块处理长未缓存后缀要走多次 Prefill 前向与调度轮次；块放大到 16,384 token，每次前向处理更多后缀，轮次减少。TTFT 在每个显示工况都下降，最大降幅 31.3%（90% 命中、并发 24）；E2E 在 8 个工况里 7 个改善，最大降幅 15.8%（90% 命中、并发 32）；50% 与 70% 命中时 TPOT 也降约 20.1% 至 21.4%。</p>
+<p>90% 命中、并发 16 时例外：TTFT 只改善 4.1%，TPOT 涨 7.4%，生成侧的增加盖过输入侧的收益，E2E 从 3,396 毫秒升到 3,471 毫秒，回退 2.2%。TTFT 降而 TPOT 涨的工况里，服务指标显示 Prefill 块放大后，每个 Decode DP rank 上平均运行请求数增加约 10% 至 20%：更快的 Prefill 把请求更早送到 Decode，生成期间每 rank 上同时活跃的请求更多，可能是 TPOT 上涨的原因之一。第 4 节配置的 GSM8K 是 96.59%，截断输出率 0.15%。</p>
+<p>同一次调查还暴露了 Decode 侧的 CUDA 图元数据问题：捕获期间把 CUDA 序列长度读回主机可能失败，迫使元数据路径走 eager 执行。已合入的改动在后端需要主机序列长度时不运行草稿元数据粘合图，并删掉 Decode 图捕获期间一次没用的序列长度求和读取；当前 DSpark 配置下主机长度守卫是防御性的。</p>
+<h2>第五招：MoE 输出改用 reduce-scatter</h2>
+<p>DeepSeek-V4.1 的 CP MoE 返回路径上，原来先对完整专家输出做全归约：每个 rank 拿到全部归约后的行，再选自己的 CP 分片并做连续化。TP=CP=4 且同组 GPU 时，每个 rank 最终只要其中四分之一的行。</p>
+<p>关键在版式：启动选项 --cp-strategy interleave 把原始提示词位置轮流分给 CP rank；MoE 之前按 rank 顺序打包本地分片，每个 rank 的行因此在收集后的缓冲里占一块连续区域，哪怕原始提示词位置是交错的。16 个 token、CP4 时缓冲是 [0,4,8,12 | 1,5,9,13 | 2,6,10,14 | 3,7,11,15]；rank 0 拥有前 4 个缓冲行，对应提示词位置 [0,4,8,12]。模型按 model_type == "deepseek_v41" 设置 cp_return_contiguous，与 CLI 策略名无关。</p>
+<p>4 个 rank 时，记 rank r 的部分整行输出为 Y_r，四者之和为 Y = [S0 | S1 | S2 | S3]。全归约让每个 rank 收到全部 4 个归约分片，再只留 S_r；reduce-scatter 让 rank 0 只收 S0、rank 1 只收 S1，依此类推。每个 rank 上存的归约输出只有四分之一大——这不等于网络流量少 75%，也不等于延迟降 4 倍。门控要求 CUDA/非 HIP 张量、TP/CP/组大小匹配、行数非零且能被 CP 大小整除。</p>
+<table>
+<thead>
+<tr>
+<th>rank</th>
+<th>全归约，40 次调用合计（ms）</th>
+<th>reduce-scatter，40 次调用合计（ms）</th>
+<th>降幅</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>68.346</td>
+<td>52.673</td>
+<td>22.9%</td>
+</tr>
+<tr>
+<td>1</td>
+<td>71.672</td>
+<td>57.369</td>
+<td>20.0%</td>
+</tr>
+<tr>
+<td>2</td>
+<td>59.915</td>
+<td>50.691</td>
+<td>15.4%</td>
+</tr>
+<tr>
+<td>3</td>
+<td>60.526</td>
+<td>44.981</td>
+<td>25.7%</td>
+</tr>
+</tbody>
+</table>
+<p>匹配的画像步里，BF16 输入形状 [16240, 5120]，每 rank 40 次 MoE 输出集合通信；另外一组附近采样步里，6 个基线步与 7 个优化步，每 rank 平均降幅 19.4% 至 21.7%。GPU 前向均值按每步最慢 rank 的跨度算，从 606.244 毫秒降到 595.320 毫秒，少 10.924 毫秒，约 1.8%——分母本身解释了大部分表面差距：占前向十分之一的阶段减少 20%，总时间只少约 2%。服务基准表显示 E2E 只降 0.8% 至 3.4%。GSM8K 保持 96.59%。</p>
+<h2>第六招：有界重放接上 CP 与 DSpark</h2>
+<p>已有的解码器侧有界重放优化先让第 0 至 20 层处理完整提示词块，再让第 21 至 39 层每请求最多执行最后 128 token。选项名带解码器侧字样，实际开在 Prefill worker 上。</p>
+<p>这是尾部边界上的一处近似：尾部起点的保留 token 本来会注意边界之前的一部分局部窗口键，但后层没有重建这些行；隐藏状态因此可能不同，差异会向后层传播。保留压缩长程历史恢复不了省掉的局部窗口计算，也做不到与完整 Prefill 等价。速度与质量的取舍属于有界重放本身。</p>
+<p>兼容修复针对的是紧凑输出的收集版式：CP 与 DSpark 辅助状态捕获下，模型返回紧凑尾部输出；eager CP 运行器原来按完整块版式收集。单个 16,384 token 块在 CP4 下，完整版式期望每 rank 4,096 个局部行，128 token 的尾部每 rank 只有 32 行；输出张量与收集元数据描述的 token 集合对不上。单个请求、无缓存前缀、提示词位置从 0 到 16,383 时，紧凑行 0、1、127 对应原始位置 16,256、16,257、16,383。改动加了一个模型专用的 postprocess_cp_output 钩子，用尾部专用的 CP 元数据收集隐藏状态与辅助状态，按原始全局 token 下标对齐 logits 与 DSpark 消费者，并在 finally 块里恢复原始批次元数据。</p>
+<p>服务基准报告 TTFT 降 13.6% 至 46.7%。70% 命中、并发 8 时，TTFT 从 4,301 毫秒降到 2,294 毫秒，E2E 从 5,358 毫秒降到 3,588 毫秒；E2E 最大降幅 34.3%，在 50% 命中、并发 8 时。同一张表里，70% 命中、并发 8 的工况 TPOT 从 2.07 毫秒每 token 升到 2.53。改动报告了 4 rank 的 token 映射与元数据恢复验证、9 个全模型功能请求与 32 道 GSM8K 冒烟测试；附带的完整 1,319 道单样本评测是 95.38%，截断输出率 0.08%。滑动窗口有界重放是近似算法，怀疑沿这条执行路径的数值计算差异导致 GSM8K 分数更低，这一点没有经过其他条件匹配、只开关重放的精度对比确认；截图报告平均输入 token 是 86，低于 128 token 的尾部。</p>
+<h2>合并对比</h2>
+<table>
+<thead>
+<tr>
+<th>缓存命中率 / 并发</th>
+<th>TTFT，基线 → 合并（ms）</th>
+<th>TPOT，基线 → 合并（ms/token）</th>
+<th>E2E，基线 → 合并（ms）</th>
+<th>E2E 降幅</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>50% / 4</td>
+<td>6,245 → 1,876</td>
+<td>2.27 → 2.56</td>
+<td>7,402 → 3,182</td>
+<td>57.0%</td>
+</tr>
+<tr>
+<td>50% / 8</td>
+<td>13,583 → 4,249</td>
+<td>2.30 → 2.36</td>
+<td>14,759 → 5,457</td>
+<td>63.0%</td>
+</tr>
+<tr>
+<td>70% / 8</td>
+<td>8,061 → 2,097</td>
+<td>2.28 → 2.46</td>
+<td>9,228 → 3,352</td>
+<td>63.7%</td>
+</tr>
+<tr>
+<td>70% / 16</td>
+<td>17,160 → 5,359</td>
+<td>2.27 → 2.47</td>
+<td>18,322 → 6,623</td>
+<td>63.9%</td>
+</tr>
+<tr>
+<td>90% / 8</td>
+<td>1,368 → 807</td>
+<td>3.07 → 3.30</td>
+<td>2,938 → 2,495</td>
+<td>15.1%</td>
+</tr>
+<tr>
+<td>90% / 16</td>
+<td>2,846 → 1,104</td>
+<td>3.17 → 3.94</td>
+<td>4,465 → 3,115</td>
+<td>30.2%</td>
+</tr>
+<tr>
+<td>90% / 24</td>
+<td>5,058 → 1,302</td>
+<td>3.09 → 4.32</td>
+<td>6,637 → 3,511</td>
+<td>47.1%</td>
+</tr>
+<tr>
+<td>90% / 32</td>
+<td>7,189 → 1,512</td>
+<td>3.16 → 4.80</td>
+<td>8,803 → 3,967</td>
+<td>54.9%</td>
+</tr>
+</tbody>
+</table>
+<p>TPOT 在 8 个工况里全部上涨 2.6% 至 51.9%。90% 命中、并发 32 时，TPOT 从 3.16 毫秒每 token 升到 4.80，TTFT 同期从 7,189 毫秒降到 1,512。一种可能解释是更快的 Prefill 让更多请求同时活跃在 Decode 上；验证这个假设需要匹配的 Decode 运行批次指标，DSpark 每验证步的 token 数能区分推测接受率变化与 Decode 负载变化；这些匹配测量没有报告，TPOT 上涨的原因仍未解决。整体延迟收益描述的是 64K 输入、512 输出的输入重型工况，读数时要连同生成侧成本一起看。</p>
+<p>合并配置的 GSM8K 是 95.38%，相对基线截图的 96.74% 低 1.36 个百分点；请求错误率 0.00%，截断输出率 0.08%。分数更低的原因没有确认；第 6 节讨论了有界重放假设与局限。截图只报告 GSM8K 结果，本身没有建立长上下文质量对等或数值等价。</p>
+<h2>复现要点</h2>
+<p>复现 1P1D 实验从共同开发起点 commit d0a7565 开始，按各节开头列出的改动与设置打补丁。Prefill 占 4 卡 H200（TP4/CP4/EP4），Decode 占 4 卡（TP4/DP4/EP4）；全部配置都用交错 CP、关闭 Prefill CUDA 图。CHUNK_SIZE 按对比表设置；有界重放关闭时 BOUNDED_REPLAY_ARGS 保持空，开启时设为 (--enable-decoder-swa-bounded-replay)。服务器命令与基准脚本用 /models/DeepSeek-V4.1-Flash/ 作为本地模型权重副本。精度评测走路由器端点跑 GSM8K；性能基准脚本对每个缓存命中率与并发工况跑三次，每次 512 个请求加 10 个热身请求。</p>
+<p>截至 2026 年 11 月 10 日，基础改动与讨论的六处改动全部已合入；主线 commit 2d93fbfe5115131dd443dcbccde4426270119d6b 已包含上述全部改动。核查版本：打分宽度对齐 9a8995ba0064ace674b9186404194268273ec575；有界重放与 CP/DSpark 兼容修复 f274754cb12fdefba511c05137257410df00dea5；MoE 输出 reduce-scatter f065f3d1747afacdca9982208e3d2e952dd08f09；候选打分 772a4a1c754c9c85edfec8aabef9b9edee460545；融合打分后处理 619d461d452445dbeb171d4f6f9a9e788513e40e；Decode 图元数据 70e5eccaf1e70045654074d175bcc7680051267a。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
