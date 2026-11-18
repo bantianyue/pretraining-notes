@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZYFA：MI355X 上的 FP8 注意力，lean P + 双波乒乓 + 逐块放缩 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>ZYFA：MI355X 上的 FP8 注意力，lean P + 双波乒乓 + 逐块放缩</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.zyphra.com/our-work/zyfa">https://www.zyphra.com/our-work/zyfa</a></div>
+<h1>ZYFA：MI355X 上的 FP8 注意力，lean P + 双波乒乓 + 逐块放缩</h1>
+<ul>
+<li>原文：<a href="https://www.zyphra.com/our-work/zyfa">ZYFA: Fast and Accurate FP8 Attention on AMD MI355X</a>（Zyphra 官方博客，2026-11-05 发表，2026-11-06 更新）</li>
+<li>作者：Quentin Anthony、Ganesh Bikshandi、Praneeth Medepalli、Stephen Ebert</li>
+<li>主题：低精度量化（FP8）、GPU kernel、推理优化、MI355X、注意力</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：FP8 注意力在 MI355X 上卡的不是矩阵管线，是夹在两次矩阵乘之间的 softmax；ZYFA 用 lean P、双波乒乓调度与逐块放缩三招对付它，实测激活上 FP8 吞吐达到 AITER 的 1.16 至 1.76 倍，误差反而低 62% 至 78%。</li>
+</ul>
+<h2>核心结论</h2>
+<p>prefill 是模型生成首个 token 之前对提示词的一次前向，上下文越长，注意力在其中占的时间越多。FlashAttention 把分数矩阵留在片上存储而不是高带宽存储器，注意力搬运的字节随序列长度线性增长，算术量随序列长度平方增长；长上下文下的 prefill 注意力是计算受限的，速度取决于内核让 GPU 矩阵单元保持忙碌的程度。</p>
+<p>MI355X 执行 FP8 矩阵指令的峰值速率是 BF16 的两倍，FP8 注意力原则上只要 BF16 一半的时间。实际差距小得多：32K token 时，AITER 的 FP8 注意力核只达到 FP8 峰值的 39%，BF16 核达到 BF16 峰值的 49%。FP8 还带来精度问题，注意力是对数值非常敏感的模块，DeepSeek-V3 训练时线性层用 FP8，注意力仍保持更高精度。</p>
+<p>ZYFA 是 Zyphra 为 MI355X 写的因果前向注意力核，有 BF16 与 FP8 两个版本。FP8 只加速注意力的两次矩阵乘，夹在中间的 softmax 成了瓶颈；ZYFA 的 FP8 核压缩 softmax、让它与矩阵乘重叠，并保住 8 位概率的精度。实测激活上，ZYFA 的 FP8 核达到 AITER 默认核吞吐的 1.16 至 1.76 倍，头维 128 时数值误差比 AITER 的 FP8 核低 62% 至 78%。</p>
+<h2>FP8 注意力的三个约束</h2>
+<p><strong>向量管线的 softmax 成本。</strong>FP8 把注意力两次矩阵乘 QKᵀ 与 PV 的周期减半，两次乘法跑在矩阵管线上；夹在中间的 softmax 跑在向量管线上，向量管线执行逐元素算术的速度在 FP8 与 BF16 下相同，FP8 核还得把每个概率转成 8 位。两个管线执行的都是 wave 的指令，一组 64 个线程一起发指令。一个 wave 算 32 个查询对一块 128 个键时，BF16 下向量管线需要矩阵管线 0.44 倍的周期，FP8 下需要 0.94 倍；FP8 核只有让 softmax 与矩阵乘几乎完美重叠，才能让矩阵管线保持忙碌。</p>
+<p><strong>矩阵指令的软件排序。</strong>MI355X 上一条矩阵指令（MFMA）发出后继续执行，发出它的 wave 转去执行别的指令，硬件不跟踪 MFMA 何时完成。NVIDIA Hopper 与 Blackwell 的硬件会跟踪异步矩阵指令的完成，MI355X 上只有指令顺序能让 softmax 与 MFMA 重叠，并保证每条指令不会过早读取 MFMA 的结果。AITER 的 FP8 核线程踪迹显示，softmax 运行时矩阵管线有 31.7% 的周期空闲。</p>
+<p><strong>FP8 概率的精度与下溢。</strong>概率的 FP8 格式 e4m3 只有不小于 2⁻⁶ 的值能保留全部 3 位尾数，更小的值丢精度，低于 2⁻¹⁰ 的值下溢为零。长行里多数概率远低于行里最大的那个：Mistral-7B 第 20 层、16K token 下，一行与一块 64 个键配对时，91% 的配对里块内最大概率比行最大值低 8 个 binades（2 的幂次）以上。下溢还会让输出产生偏置：AITER 的 FP8 核用未舍入概率之和做行和分母，每个下溢为零的概率仍计入行和，输出会略微向零收缩。</p>
+<h2>内核设计的三招</h2>
+<p><strong>lean P：线性近似 FP8 编码。</strong>标准 FP8 核对每个概率 p = 2ˣ 做指数指令再舍入到 e4m3，x 是分数减行最大值后以 2 为底的单位，称为精确概率 P，每分要 14 个向量管线周期。lean P 利用正 e4m3 数的 8 位位模式当整数读、称为编码时，值每翻一倍编码恰好加 8；2ˣ 的编码接近 8x 加一个常数，lean P 用一次乘加与一次转整数算出编码，每分只要 6 个周期。lean P 是近似：68 个头维 128 的捕获层上，lean P 把单次注意力调用的误差提到精确概率 P 的 1.22 至 1.36 倍，仍只有 AITER 核误差的 0.26 倍（几何平均）。ZYFA 在头维 128 时默认用 lean P，MLA 形状用精确概率 P。</p>
+<p><strong>双波乒乓调度（汇编手写）。</strong>每条 SIMD 是计算单元四个执行单元之一，跑 FP8 核的两条 wave；每阶段一条 wave 发本块的矩阵指令，另一条算 FP8 概率，过一个屏障后互换角色。FlashAttention-3 把这种排布称为乒乓调度。每阶段持续到两条 wave 都到达屏障，阶段长度由较慢的那条 wave 决定：精确概率 P 下 softmax 波最后到达，矩阵管线 60% 的周期忙碌；lean P 下矩阵波最后到达，矩阵管线 86% 的周期忙碌。两条 wave 从同一条 SIMD 发指令，重叠程度取决于每条指令的精确位置，Python 生成器把 FP8 核直接生成汇编，固定每条指令的位置。捕获激活上，同一核用 HIP（AMD 的 C++ 内核语言）写需要多 43% 至 46% 的周期；论文的逐步对比里，汇编调度是全部设计步骤中收益最大的一步。</p>
+<p><strong>逐块放缩，再用舍入后的行和归一化。</strong>FP8 核把每块 64 个键的概率乘上一个 2 的幂，让块内最大概率接近 1；CDNA4 的放缩 FP8 矩阵指令在 PV 乘积里把同一个幂除回去，不花额外成本。核还除以舍入后概率之和，每块多一次 MFMA，用同一批乘 V 的值算出；每个输出是权重和为 1 的加权平均，多出的 MFMA 让每块矩阵周期增加 6%。</p>
+<h2>吞吐量</h2>
+<p><strong>捕获激活、持续时钟。</strong>捕获激活指 Mistral-7B、Qwen3-8B、DeepSeek-V2-Lite 各一层在 16K token 下产生的查询、键与值。MI355X 在持续负载下会降低着色器时钟（SCLK），每次运行把同一个核连续启动数秒，只在时钟稳定后计时。ZYFA 的 FP8 核在三层上分别达到 AITER 的 1.16 倍、1.17 倍与 1.76 倍。DeepSeek-V2-Lite 上比值最大，因为 CK 作为 AITER 在 MLA 形状的默认 FP8 核，发的是每时钟吞吐减半的老矩阵指令。完整前向里 16K token 下，FP8 比值在全部层上的中位数是 Mistral-7B 1.26 倍、Qwen3-8B 1.25 倍。</p>
+<p><strong>高斯输入。</strong>高斯输入、只计核时间的典型核基准里，ZYFA 的 FP8 核在 1K 到 32K token 每个序列长度上都快于 AITER，BF16 核在 16K 与 32K token 时为 AITER 的 1.00 至 1.03 倍。BF16 下矩阵乘的周期是 softmax 的两倍多，矩阵乘决定两家核的时间；FP8 精确概率 P 下 softmax 波每阶段都比矩阵波晚到屏障，softmax 反而决定核时间。</p>
+<p><strong>时钟随操作数变化。</strong>MI355X 的持续时钟随运算单元里数值的变化而变化。每次从 0 变 1 的位都要充放电，操作数在相邻指令间切换的位越多，电流越大、时钟越低。FP8 MFMA 循环里，操作数恒定时跑 2.34 GHz，每条指令都变的操作数下跑 2.07 GHz。捕获的 Mistral-7B 层上，ZYFA 的 FP8 核周期比 AITER 少，时钟却只有 1628 MHz，AITER 是 2108 MHz。AITER 把远低于行最大值的块写成次正规数或零，这些值切换的位很少；ZYFA 的逐块放缩让它们保持正规数。高斯输入下注意力近乎均匀，两家核只写正规数，这一层的 ZYFA 提速从 1.16 倍涨到 1.30 倍。随机输入上的吞吐不能可靠预测真实模型激活上的吞吐。</p>
+<h2>精度</h2>
+<p><strong>单次注意力调用的误差。</strong>要分离出内核本身引入的误差，把核输出与同一量化输入上的 fp64 注意力对比。FP8、头维 128 时，ZYFA、CK 与 Triton 的误差相差百分之几，ZYFA 的误差在 Mistral-7B 与 Qwen3-8B 上分别是 AITER 的 FP8 核的 0.22 倍与 0.38 倍。AITER 多出的误差主要来自除以未舍入概率之和。完整 Mistral-7B 模型里，相对 fp64 注意力模型的 KL 散度，ZYFA 的 FP8 核是 3.4 × 10⁻³，AITER 是 5.9 × 10⁻³。</p>
+<p><strong>全模型里的 FP8 误差。</strong>全模型里 FP8 误差主要来自量化输入。Mistral-7B 上，量化 Q、K、V 引入的误差是 lean P 下量化概率的 8 倍，Q 与 K 的贡献大于 V。对 Q、K 在头维上做 Hadamard 旋转不改变 QKᵀ，但把大通道摊到全部通道上，输入误差大致减半。Mistral-7B 上旋转把相对 BF16 模型的 KL 散度从 BF16 噪声带上限的 45.7 倍降到 21.9 倍，带旋转的注意力只要全 FP8 时间的 1.001 倍。把最敏感的头留在 BF16 里是更差的时间用法：Mistral-7B 与 Qwen3-8B 上即使 90% 的头用 BF16 也达不到噪声带，这种混合比全 BF16 注意力还慢。</p>
+<h2>还剩三处差距与四条建议</h2>
+<p>32K token 高斯输入、头维 128 下，ZYFA 的 FP8 核达到数据手册峰值的 53%。还剩三处差距：持续时钟远低于数据手册峰值假设的 2.4 GHz；查询瓦片切换时矩阵管线空闲；lean P 下矩阵波还要算行最大值与输出重放缩，矩阵波现在比 softmax 波更长，决定每阶段的长度。</p>
+<p>给内核开发者的建议：</p>
+<ol>
+<li>在真实激活、持续时钟下测量，时钟速度随输入数据变化。</li>
+<li>先瞄准输入的量化，例如对 Q、K 做 Hadamard 旋转，再处理概率的量化。</li>
+<li>先减少每分的向量工作量，再增加矩阵吞吐。softmax 仍是瓶颈时，更快的矩阵格式本身没有帮助。</li>
+<li>别让打包 FP32 指令出现在与 MFMA 相邻的 softmax 里。打包指令让每个线程一次对两个值做一个操作，与 MFMA 在同一条 SIMD 上执行时打包 FP32 指令会停顿。</li>
+</ol>
+<h2>未来工作与方法局限</h2>
+<p>未来工作：补上上面三处差距；把 lean P 推广到编码随值翻倍固定步长增长的其他格式，如 e5m2 与 FP4；支持解码、分页 KV 缓存与变长批次。源代码在 github.com/Zyphra/zyfa，论文在 arXiv。</p>
+<p>方法与局限：全部实验在一台 8 卡 MI355X 节点上跑，默认自动时钟策略，整板功耗（TBP）上限 1400 W，ROCm 7.2.3；基线是 AITER 0.1.19 的默认核选择。高斯输入的核计时取 500 次热身启动后 100 次启动的平均设备时间；持续计时先跑 1 秒热身启动，再计时至少 3 秒的窗口。全模型研究覆盖三个模型、PG-19 文本，没有下游任务。内核只覆盖查询与键等长的因果前向，不覆盖解码、分页 KV 缓存或变长批次。数据依赖的时钟随固件或功耗设置而变化，内核与基线都在快速变化，所有结果都是时间点快照。</p>
+<h2>附录：实测数据表</h2>
+<p><strong>A1. 捕获激活、持续时钟：</strong>每模型取一层，序列长度 16K。时间比是 AITER 时间除以 ZYFA 时间，大于 1 表示 ZYFA 更快；高斯比是同形状高斯输入下的比值。</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>精度</th>
+<th>ZYFA (TFLOP/s)</th>
+<th>AITER (TFLOP/s)</th>
+<th>时间比</th>
+<th>高斯比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mistral-7B</td>
+<td>FP8</td>
+<td>2,537</td>
+<td>2,191</td>
+<td>1.16</td>
+<td>1.30</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>FP8</td>
+<td>2,495</td>
+<td>2,130</td>
+<td>1.17</td>
+<td>1.29</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>FP8</td>
+<td>2,337</td>
+<td>1,326</td>
+<td>1.76</td>
+<td>1.84</td>
+</tr>
+<tr>
+<td>Mistral-7B</td>
+<td>BF16</td>
+<td>1,223</td>
+<td>1,196</td>
+<td>1.02</td>
+<td>1.03</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>BF16</td>
+<td>1,202</td>
+<td>1,191</td>
+<td>1.01</td>
+<td>1.02</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>BF16</td>
+<td>1,285</td>
+<td>1,276</td>
+<td>1.01</td>
+<td>1.01</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>精度</th>
+<th>ZYFA (µs)</th>
+<th>AITER (µs)</th>
+<th>ZYFA SCLK (MHz)</th>
+<th>AITER SCLK (MHz)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mistral-7B</td>
+<td>FP8</td>
+<td>867</td>
+<td>1,003</td>
+<td>1,628</td>
+<td>2,108</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>FP8</td>
+<td>881</td>
+<td>1,032</td>
+<td>1,629</td>
+<td>2,048</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>FP8</td>
+<td>588</td>
+<td>1,036</td>
+<td>1,742</td>
+<td>2,219</td>
+</tr>
+<tr>
+<td>Mistral-7B</td>
+<td>BF16</td>
+<td>1,798</td>
+<td>1,838</td>
+<td>1,590</td>
+<td>1,446</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>BF16</td>
+<td>1,830</td>
+<td>1,847</td>
+<td>1,586</td>
+<td>1,438</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>BF16</td>
+<td>1,069</td>
+<td>1,077</td>
+<td>1,449</td>
+<td>1,403</td>
+</tr>
+</tbody>
+</table>
+<p><strong>A2. 高斯核基准：</strong>ZYFA 吞吐除以 AITER 默认核吞吐，高斯输入、只计核时间、批大小 1。MLA 形状（查询键维 192）下 FP8 基线是 CK。最后一列是 32K 下 ZYFA 与 AITER 的吞吐。</p>
+<table>
+<thead>
+<tr>
+<th>注意力</th>
+<th>精度</th>
+<th>头形状</th>
+<th>2K</th>
+<th>16K</th>
+<th>32K</th>
+<th>32K TFLOP/s (ZYFA / AITER)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MHA</td>
+<td>FP8</td>
+<td>128</td>
+<td>1.44</td>
+<td>1.34</td>
+<td>1.37</td>
+<td>2,672 / 1,944</td>
+</tr>
+<tr>
+<td>MHA</td>
+<td>FP8</td>
+<td>MLA (192)</td>
+<td>2.02</td>
+<td>1.89</td>
+<td>1.99</td>
+<td>2,464 / 1,237</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>FP8</td>
+<td>128</td>
+<td>1.42</td>
+<td>1.28</td>
+<td>1.26</td>
+<td>2,563 / 2,027</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>FP8</td>
+<td>MLA (192)</td>
+<td>1.94</td>
+<td>1.82</td>
+<td>1.88</td>
+<td>2,374 / 1,262</td>
+</tr>
+<tr>
+<td>MHA</td>
+<td>BF16</td>
+<td>128</td>
+<td>1.05</td>
+<td>1.03</td>
+<td>1.02</td>
+<td>1,265 / 1,236</td>
+</tr>
+<tr>
+<td>MHA</td>
+<td>BF16</td>
+<td>MLA (192)</td>
+<td>1.04</td>
+<td>1.01</td>
+<td>1.00</td>
+<td>1,330 / 1,329</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>BF16</td>
+<td>128</td>
+<td>1.07</td>
+<td>1.02</td>
+<td>1.02</td>
+<td>1,310 / 1,283</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>BF16</td>
+<td>MLA (192)</td>
+<td>1.07</td>
+<td>1.00</td>
+<td>1.00</td>
+<td>1,376 / 1,378</td>
+</tr>
+</tbody>
+</table>
+<p><strong>A3. 单次注意力调用误差：</strong>相对同一量化输入上 fp64 注意力的相对均方根误差，按模型各层取平均。括号里是同层内核误差除以 AITER 误差后再按层平均。AITER 的 Triton 核在 MLA 形状不支持 FP8。</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>精度</th>
+<th>ZYFA</th>
+<th>AITER</th>
+<th>CK</th>
+<th>Triton</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mistral-7B</td>
+<td>FP8</td>
+<td>1.20e-02 (0.22)</td>
+<td>6.41e-02</td>
+<td>1.16e-02 (0.22)</td>
+<td>1.14e-02 (0.21)</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>FP8</td>
+<td>9.11e-03 (0.38)</td>
+<td>3.17e-02</td>
+<td>8.94e-03 (0.37)</td>
+<td>8.86e-03 (0.37)</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>FP8</td>
+<td>8.36e-03 (0.82)</td>
+<td>1.02e-02</td>
+<td>1.02e-02 (1.00)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Mistral-7B</td>
+<td>BF16</td>
+<td>1.81e-03 (1.02)</td>
+<td>1.77e-03</td>
+<td>1.98e-03 (1.12)</td>
+<td>1.81e-03 (1.02)</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>BF16</td>
+<td>1.75e-03 (1.01)</td>
+<td>1.73e-03</td>
+<td>1.94e-03 (1.12)</td>
+<td>1.75e-03 (1.01)</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>BF16</td>
+<td>1.94e-03 (1.00)</td>
+<td>1.94e-03</td>
+<td>1.96e-03 (1.01)</td>
+<td>1.77e-03 (0.91)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>A4. 单次 FP8 调用分阶段误差：</strong>ZYFA 的 FP8 核相对均方根误差，拆成输入量化（Q、K 与 V）、概率量化（P）与内核其余算术三部分。Mistral-7B 与 Qwen3-8B 上 ZYFA 用 lean P，DeepSeek-V2-Lite 的 MLA 形状用精确概率 P。</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>旋转</th>
+<th>输入</th>
+<th>概率 P</th>
+<th>其余</th>
+<th>合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mistral-7B</td>
+<td>无</td>
+<td>8.3e-02</td>
+<td>1.0e-02</td>
+<td>5.0e-03</td>
+<td>8.3e-02</td>
+</tr>
+<tr>
+<td>Mistral-7B</td>
+<td>Hadamard</td>
+<td>4.4e-02</td>
+<td>1.0e-02</td>
+<td>4.8e-03</td>
+<td>4.5e-02</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>无</td>
+<td>1.1e-01</td>
+<td>1.0e-02</td>
+<td>4.7e-03</td>
+<td>1.1e-01</td>
+</tr>
+<tr>
+<td>Qwen3-8B</td>
+<td>Hadamard</td>
+<td>5.6e-02</td>
+<td>9.9e-03</td>
+<td>4.5e-03</td>
+<td>5.7e-02</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>无</td>
+<td>9.5e-02</td>
+<td>8.1e-03</td>
+<td>4.4e-03</td>
+<td>9.5e-02</td>
+</tr>
+<tr>
+<td>DeepSeek-V2-Lite</td>
+<td>Hadamard</td>
+<td>5.6e-02</td>
+<td>8.1e-03</td>
+<td>4.3e-03</td>
+<td>5.6e-02</td>
+</tr>
+</tbody>
+</table>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
