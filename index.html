@@ -828,6 +828,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">并行策略</span><span class="tag">GPU kernel</span><span class="tag">SGLang</span><span>收藏于 2026-11-18</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">73</span>《Fuse-All MoE TPU 核》一次 launch 算完写回，偏斜 prefill 从 2.3 倍压到 1.09 倍</h3>
+  <p>MoE 推理在 TPU 上卡在两处——专家算完的中间结果要搬来搬去，路由偏斜又让少数设备拖住整层；Fuse-All 把 token 收集、两次投影、门控激活与输出写回融进一次 Pallas 专家 launch，中间结果留在片上 VMEM、结果直写最终 token 槽位，固定 token 槽位目的地让调度与专家安放可变而路由语义不变；行分桶、热专家交错、chipmate 重分布与目的地交错把偏斜 EP16 prefill 核运行时间从均衡参考的 2.3 倍压到 1.09 倍，32 至 512 token 的 decode 上对称 EP8TP2 核延迟相对融合 EP16 最多降 21.3%，整栈服务吞吐相对 Megablox EP16 基线高 12% 至 34.5%。</p>
+  <div class="links">
+    <a class="cn" href="pages/fuse-all-moe-kernel-tpu.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/abs/2611.17857">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">MoE 推理</span><span class="tag">GPU kernel</span><span class="tag">并行策略</span><span class="tag">负载均衡</span><span>收藏于 2026-11-18</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
