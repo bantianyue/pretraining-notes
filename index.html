@@ -838,6 +838,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">MoE 推理</span><span class="tag">GPU kernel</span><span class="tag">并行策略</span><span class="tag">负载均衡</span><span>收藏于 2026-11-18</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">74</span>《vLLM 与 SGLang 跑 AI Agent 慢在哪》历史重算 55%，首 token 等 28.6 秒</h3>
+  <p>聊天与批处理上 vLLM 与 SGLang 很快，AI Agent 是另一种负载——Agent 每回合把整段对话重发给模型，工具一跑、回来时上回合的 KV 很可能已被逐出显存，整段历史又要重算一遍；实测里 vLLM 与 SGLang 处理的 prompt token 中 51% 至 55% 是已经算过一次又被逐出的历史；把会话留在显存里、共享公共前缀、按容量准入新会话，重算压到 8% 至 16%，全程快 1.31 至 1.45 倍，首 token 快约 5 倍；但逐 token 解码反而比 vLLM 慢 15% 至 21%，收益全来自不重算。</p>
+  <div class="links">
+    <a class="cn" href="pages/devto-vllm-sglang-ai-agents.html">中文精读 →</a>
+    <a class="en" href="https://dev.to/nahuel990/why-vllm-and-sglang-might-not-be-the-best-option-to-run-ai-agents-5ehb">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">Agent for Infra</span><span class="tag">KV 缓存</span><span class="tag">vLLM</span><span>收藏于 2026-11-18</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
