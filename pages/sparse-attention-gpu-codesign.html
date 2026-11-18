@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA 稀疏注意力 GPU 共设计：索引器装进单块 Tensor Core 的八条指南 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>NVIDIA 稀疏注意力 GPU 共设计：索引器装进单块 Tensor Core 的八条指南</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/co-designing-sparse-attention-for-efficient-long-context-inference/">https://developer.nvidia.com/blog/co-designing-sparse-attention-for-efficient-long-context-inference/</a></div>
+<h1>NVIDIA 稀疏注意力 GPU 共设计：索引器装进单块 Tensor Core 的八条指南</h1>
+<ul>
+<li>原文：<a href="https://developer.nvidia.com/blog/co-designing-sparse-attention-for-efficient-long-context-inference/">Co-Designing Sparse Attention for Efficient Long-Context Inference</a>（NVIDIA Technical Blog，2026-11-17）</li>
+<li>作者：Timmy Liu、Nidhi Bhatia、Samkit Jain、Makesh Tarun Chandran、Bita Darvish Rouhani</li>
+<li>主题：稀疏注意力、推理优化、GPU kernel、长上下文、投机解码</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：稀疏注意力把长上下文成本从核心注意力搬进索引器，128K 下索引器与 Top-k 占单层 prefill 的 47%；八条硬件共设计指南让索引器、Top-k 与核心注意力都落在 GPU 的甜点上。</li>
+</ul>
+<h2>核心结论</h2>
+<p>长上下文下注意力是单层最贵的部分。稀疏注意力把每查询的打分对象从全部上下文缩到几千个最相关的键，核心注意力的成本不再随上下文增长，但找键的索引器仍要扫全部 N 个键，成本只是转移了地方：128K 下 DeepSeek V3.2 单层 prefill 里索引器与 Top-k 占 47%，核心注意力 24%，FFN 25%。</p>
+<p>索引器本质是一次带融合 epilogue 的批量矩阵乘，算术强度随组大小 G 与投机草稿长度 D+1 变化。八条指南围绕一个目标：让索引器、Top-k 与核心注意力都落在 GPU 硬件的甜点上。</p>
+<h2>稀疏注意力的三阶段</h2>
+<p>稀疏注意力分三个阶段：索引器给全部键打分，Top-k 留下分数最高的 k 个，核心注意力只对这 k 个键值做 softmax 注意力。后两阶段随 k 伸缩，索引器随 N 伸缩。</p>
+<p>讨论范围限定在训练进模型的稀疏注意力，而不是训练后外挂的方法，如 BLASST、MInference、Quest。测量用一个生产级 FP8 内核，扫索引器的设计旋钮（查询头、键头、头维度、压缩比、投机解码深度）。</p>
+<h2>索引器设计空间</h2>
+<p>索引器是个小型的类注意力模块。查询头拿当前查询对索引器键缓存打分，再经过 ReLU、加权求和这类后处理，把分数变成每个键一个 logit。近期模型的主流填法：KH=1、32 至 64 个查询头规约成一个分数、ReLU 加权求和、头维 128、token 级或小块选择。</p>
+<table>
+<thead>
+<tr>
+<th>模型 / 方法</th>
+<th>Q 头数</th>
+<th>K 头数</th>
+<th>头维</th>
+<th>后处理</th>
+<th>压缩比</th>
+<th>选择粒度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DeepSeek 稀疏注意力（DSA）</td>
+<td>64</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 加权求和</td>
+<td>1</td>
+<td>token</td>
+</tr>
+<tr>
+<td>GLM 5.2</td>
+<td>32</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 加权求和</td>
+<td>1</td>
+<td>token，索引跨层共享</td>
+</tr>
+<tr>
+<td>GLM 5.3 Flash</td>
+<td>32</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 加权求和</td>
+<td>4</td>
+<td>4 块 + 尾部</td>
+</tr>
+<tr>
+<td>LongCat LSA-Flash</td>
+<td>32</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 加权求和</td>
+<td>1</td>
+<td>token，分层，索引共享</td>
+</tr>
+<tr>
+<td>CSA</td>
+<td>64</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 加权求和</td>
+<td>4</td>
+<td>压缩 token</td>
+</tr>
+<tr>
+<td>Qwen QSA</td>
+<td>4</td>
+<td>1</td>
+<td>128</td>
+<td>ReLU + 求和</td>
+<td>4</td>
+<td>4 块 + 尾部</td>
+</tr>
+<tr>
+<td>MiniMax MSA</td>
+<td>4（每组 1 个）</td>
+<td>1</td>
+<td>128</td>
+<td>分数取最大值池化</td>
+<td>1</td>
+<td>128 块</td>
+</tr>
+<tr>
+<td>NSA</td>
+<td>64</td>
+<td>4</td>
+<td>192</td>
+<td>Softmax</td>
+<td>16</td>
+<td>16 块</td>
+</tr>
+<tr>
+<td>MoBA</td>
+<td>32</td>
+<td>8</td>
+<td>128</td>
+<td>均值池化</td>
+<td>4096</td>
+<td>4096 块</td>
+</tr>
+</tbody>
+</table>
+<h2>索引器如何计算：一次带融合 epilogue 的矩阵乘</h2>
+<p>prefill 一次给全部 ISL 个查询 token 打分，矩阵乘很大、计算受限；decode 每步只给 D+1 个查询 token 打分，要把整个键缓存从 HBM 流过，只为算几行 logit。因果掩码让每个 prefill 形状减半。</p>
+<p>算术强度公式引出三点观察：序列长度与压缩比不出现在公式里，只改总工作量，不改 FLOPs 与字节之比；两式强度都正比于 G=QH/KH，把一组 G 个头规约成一个 logit，等于每写一个 logit 多拿 G 倍 FLOPs，没有这种规约的设计（MSA、MoBA）丢掉这个因子；decode 强度随 D+1 近似线性增长，基本与 Hsz 无关，只要 D+1 个查询 token 能一次扫过键缓存。</p>
+<p>除非另有说明，测量用 FP8 索引器内核：64K 索引器键（CR=4）、Hsz=128、KH=1、PB=1、DB=128。</p>
+<h2>八条指南与关键数字</h2>
+<p><strong>指南1：G×(D+1) 装进一块 Tensor Core 瓦片，约 200 行（FP16 epilogue 下 256 行）。</strong>一块瓦片最多容纳 256 个查询行，FP32 epilogue 下寄存器压力把实际瓦片限制在约 200 行：G=32 时 6 个查询 token，G=8 时 26 个。到这个点之前，运行时间只涨 1.37 倍与 1.87 倍，工作量却涨了 6 倍与 26 倍；超过这个点，内核启动更多 CTA，运行时间阶梯式上升。decode 运行时间在 G 扩大 16 倍时只动 2%，因为一次键缓存读取决定了运行时间；prefill 里 G 从 8 翻到 16 只贵 1.66 倍而不是 2 倍。</p>
+<p><strong>指南2：索引器 epilogue 跑在 FP16，累加也用 FP16。</strong>FP16 epilogue 把瓦片拓宽到 256 行，G=64、D+1=4 时提速 1.31 倍；矩阵乘也在 FP16 下累加能到 1.45 倍，前提是索引器的 QK 缩放让矩阵乘输出保持在 FP16 范围内。</p>
+<p><strong>指南3：KH 取 1，配合交叉头规约。</strong>decode 里每多一个 KH 就多读一遍完整键缓存、多写一组 logit，运行时间随 KH 线性增长：KH 从 1 到 8，运行时间涨 7.6 倍，FLOPs 不变。prefill 只涨 1.3 至 1.6 倍。</p>
+<p><strong>指南4：Hsz 取 128 或 256，多数设计落在 128。</strong>prefill 里 Hsz 从 64 到 128 只贵 1.1 至 1.2 倍而不是 2 倍，因为矩阵乘 FLOPs 填进了 epilogue 的等待时间；超过 128 运行时间随 FLOPs 增长。decode 里运行时间全程随 Hsz 增长。Hsz=64 会让 Tensor Core 空等 epilogue。</p>
+<p><strong>指南5：减少索引器打分的键。</strong>CR 每减半，prefill 与 decode 运行时间都翻倍（最小缓存 8K 键处例外，1.8 倍）。三条路：压缩索引器键（CSA、GLM 5.3 Flash、QSA、NSA、MoBA）、分层索引（LSA-Flash）、跨层共享索引（GLM 5.2、LSA-Flash）。这些做法不改变算术强度，与指南1 至 4 并用。</p>
+<p><strong>指南6：把 Top-k 算进索引器的预算里。</strong>键数每翻一倍，prefill 贵约 1.7 倍、decode 贵约 1.5 倍；k 扩大 64 倍，Top-k 时间在 prefill 涨不到 2 倍、decode 涨 1.7 倍。Top-k 的杠杆是打分的键数，不是 k。TensorRT LLM 的 Guess-Verify-Refine Top-k 拿上一步结果当猜测，在 DeepSeek V3.2 与 V4 的 decode 上比标准 radix 选择快 2.1 至 2.4 倍；FlashInfer 的选择性 Top-k 路径把打分、规约与过滤融进一个内核，从不写出完整 logit 矩阵。</p>
+<p><strong>指南7：优先块级选择、块尽量大。</strong>token 级选择下被选键值散落，内核逐个查地址取回；块级选择下一个地址服务一整块，选了同一块的查询共享取回。预算固定为每查询选 2,048 个键时，块大小减半，prefill 与 decode 运行时间都接近翻倍。</p>
+<p><strong>指南8：核心注意力组尽量大。</strong>稀疏注意力里每个查询 token 各选各的块，复用只限于共享一个 KV 头的同一 token 的查询头；组越大、共享每个 KV 头的查询头越多，取回的一块服务的头就越多。</p>
+<h2>启发</h2>
+<p>对做长上下文推理与稀疏模型设计的人，这八条指南可以直接当检查清单：先看 G×(D+1) 是否装进一块瓦片，再看 KH 是不是 1、Hsz 是不是 128、Top-k 有没有融进索引器；块级选择与大组则是核心注意力侧的两道关。索引器是稀疏注意力长上下文成本的落点，不是核心注意力。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
