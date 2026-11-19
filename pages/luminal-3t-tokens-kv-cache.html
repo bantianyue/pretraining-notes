@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Luminal 推理云每天 3 万亿 token：97% KV 缓存命中率 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Luminal 推理云每天 3 万亿 token：97% KV 缓存命中率</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://blog.luminal.com/p/how-we-scaled-above-2-t-tokens-in">https://blog.luminal.com/p/how-we-scaled-above-2-t-tokens-in</a></div>
+<h1>Luminal 推理云扩到每天 3 万亿 token：97% KV 缓存命中率是怎么做到的</h1>
+<ul>
+<li>原文：<a href="https://blog.luminal.com/p/how-we-scaled-above-2-t-tokens-in">How We Scaled Above 2 T Tokens A Month or Why I Did Not Sleep in October</a>（Matthew Gunton，Luminal 博客，2026-11-18）</li>
+<li>收藏日期：2026-11-20</li>
+<li>星级：⭐⭐⭐⭐</li>
+<li>主题：推理优化、KV 缓存、并行策略（推理）</li>
+<li>标签：推理优化、KV 缓存、TTFT</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Luminal 的推理云几周内从每天几千亿 token 扩到每天 3 万亿以上，靠的不是堆 GPU，而是把 <strong>KV 缓存命中率</strong>当作第一性原理来守：接纳单位改成“席位”（一段正在进行的会话），故障时把请求打散再迁回，扩容逐节点进行、路由器流量每次只放 10%，峰值日 3120 万请求、3.22 万亿 token，命中率合计 97.3%。</p>
+<h2>核心数字</h2>
+<ul>
+<li>规模：峰值日接入 <strong>3120 万次请求、3.22 万亿 token</strong>（输入+输出）；峰值过后日均 1.67 万亿，工作日峰值 2.6 万亿；可用性 <strong>99%</strong>。</li>
+<li>请求形态：平均约 <strong>8.5 万个输入 token</strong>，中位提示词 14.6 万 token，p90 27.6 万，最大 55 万；请求体约 2.0 MB；工作日平均每分钟约 9000 个请求，即每分钟 18 GB 请求体、持续 2.5 Gbps。</li>
+<li>命中率：集群每小时命中率合计 <strong>97.3%</strong>；扩容后回到 <strong>98%</strong>（11 月 3 日）。</li>
+<li>经济学：DeepSeek 缓存输入价比未缓存输入便宜 <strong>50 倍</strong>（每百万 token 非高峰 0.003 美元对 0.15 美元）；16 万 token 的轮次，热轮次输入成本约 0.0005 美元，冷轮次 0.02 到 0.05 美元；命中率掉 1 个点，答案成本大约增加 <strong>20%</strong>。</li>
+<li>TTFT：同一会话冷启动 <strong>12.6 秒</strong>（预填充 16 万 token），热启动 <strong>1.45 秒</strong>（只预填充 86 个 token）；冷请求来得比集群预填充速度快时，首 token 时间中位数在 0.6 秒到 12 秒之间波动；冷会话每 1000 个 token 约 0.08 秒。</li>
+<li>事故：10 月 14 日一次单步流量份额变化移动约 <strong>325 个会话</strong>，几分钟内命中率掉到 80% 到 91%；10 月 19 日一个客户以批准速率 <strong>3.5 倍</strong>发送请求；10 月 20 日重试风暴中 06:00 拒绝占比 <strong>90%</strong>，13:00 当小时尝试约 640 万、拒绝占 74%。</li>
+</ul>
+<h2>机制一：席位，不是请求</h2>
+<p>SaaS 通常按请求跟踪，但请求是 KV 缓存的错误度量单位：继续一段已见过的会话只要几千个未缓存 token 的预填充；开启新会话或移到从没见过它的副本上，要花掉整个对话记录（中位数约 14.6 万 token）。请求计数器分不出这两种，而正是第二种会压垮集群。</p>
+<p>接纳单位改成<strong>席位</strong>：一个席位是一段正在进行的会话。路由器维护一本笔记本，记录放在 GPU 上的会话；每次请求按会话 id 查表。持有席位的会话整个生命周期都去同一批 GPU；席位在最后一次轮次后 5 分钟内算占用，该行保留 1 小时。没有席位的会话，只有别名未超上限、且 GPU 当前能接纳时才获得席位；达到上限则本轮被拒绝、不写行，之后可认领空出的席位；GPU 实际没服务过的轮次永远不写席位。</p>
+<p>席位的本质是给 KV 缓存逐出一个可控的时钟：时间限制让逐出决策精确，命中率随之提高。备选方案都否了：飞行中请求上限分不出冷热请求；冷请求预算物理上对但路由器在引擎回答前不知道缓存 token 数、只能估算，预测引擎并不比席位近似更好；预热（迁移前先预填充）正在做，但不降性能很难。</p>
+<h2>机制二：故障转移路由</h2>
+<p>环形结构先试一个 GPU worker、失败再试下一个，会让后续 GPU 性能大幅下降。做法是把请求分散到整个集群，等新 GPU 恢复在线后再迁回原 worker；流量自然增长也有助于避免 KV 缓存节流。</p>
+<p>扩容第一天的教训：放置策略“第一眼看到最空闲的副本就钉住”，让少数副本钉在序列上限、排队 50 到 130 个请求，其他副本闲置；过载副本被看作“崩溃”，不良行为在节点间跳来跳去。修复是两条规则：一、按副本<strong>自数</strong>飞行中的请求而不是问引擎（避开指标引擎的延迟）；二、设<strong>上限</strong>（避免在吞吐-交互曲线上滑坡）；同一档内缓存前缀最长的胜出。第二天集群到 98.0%，保持一周。</p>
+<h2>机制三：首 token 时间保护</h2>
+<p>冷预填充（可能命中率低的请求）是最重要的技能：短时间内大量冷预填充会让其他请求退化，所以把它们分散到各 worker 是维持 SLA 的真正要求。高命中率让客户花得更少，也帮服务商在 SLA 内服务更多请求，两边利益一致。</p>
+<p>负载单位是<strong>每分钟冷会话数</strong>，所有接纳决策都是为了限制这个数。扩容本身有命中率代价：重新画像的副本重启后是空的，新节点加入时是空的，放置环会把一部分现有会话洗牌到新节点上。代价与移动的会话占比成正比，所以扩容要慢慢来：逐节点走排空、下线、准备、接纳，由单租约做围栏、出错即失败关闭；新状态路由器的流量每 6 分钟只放 10%。</p>
+<h2>机制四：到 GPU 的网络也是模型的一部分</h2>
+<p>第一堵墙在路由器：平均请求体 0.8 到 2.0 MB，路由 CPU 的网卡在其核心饱和之前先饱和，出站连接在同一条饱和链路上挨饿。</p>
+<p>10 月 19 日的客户超速事件暴露两点：冷预填充比例飙升，要按席位和预期冷预填充 token 数限流；网卡饱和很大程度上由智能体重试策略驱动——返回带 Retry-After 头的 429 时，大多数 OpenAI API 客户端都会照做，固定数值的 Retry-After 会让所有流量同时回来（雷鸣般的 herd）。办法是把 Retry-After 的值打散；客户不一定遵守，最后手段是封禁行为不良的客户。</p>
+<h2>六张图各讲什么</h2>
+<ol>
+<li>每日 token 量（3 Oct–6 Nov 2026）：峰值 3.22T，7 日均值 1.78T；周末流量明显回落。</li>
+<li>每日 KV 命中率：35 日合计 97.3%；三次下探各有原因——10 月 9 日放置不均、10 月 20–21 日客户超速 3.5 倍、10 月 28 日至 11 月 2 日重新画像+接近翻倍。</li>
+<li>席位接纳流程图：查笔记本 → 有席位直送原副本 → 无席位看别名上限与当前容量 → 拒绝不写行。</li>
+<li>放置前后对比：改动前 R3、R5 被钉在上限（排队 110 与 70）；改动后上限 128、同档取最长缓存前缀（R5 以 60 kB 被选中）。</li>
+<li>冷热 TTFT 对比：16 万 token 预填充 12.6 秒 vs 86 token 预填充 1.45 秒。</li>
+<li>重试风暴（10 月 20 日，按小时）：拒绝占比凌晨 06:00 达 90%，13:00 尝试约 640 万、拒绝 74%，15:00 回落到 5%。</li>
+</ol>
+<h2>可复用的结论</h2>
+<ul>
+<li>KV 缓存命中率是推理服务的第一性原理：命中率每掉 1 个点，成本涨约 20%（97% 基线）。</li>
+<li>接纳与限流的单位要与成本单位对齐：按请求计数管不住冷预填充，按会话（席位）才能管住；限流要按席位+预期冷预填充 token 数。</li>
+<li>扩容的代价是会话移动占比：单步移动 325 个会话就能让命中率几分钟内掉到 80%–91%；正确做法是逐节点、有围栏、流量 10% 每 6 分钟。</li>
+<li>故障转移不要用“试下一个”：打散再迁回；放置决策要自数在途请求、设上限、同档取最长前缀。</li>
+<li>Retry-After 必须是打散的值，固定值会制造重试风暴；网卡先于 CPU 核心饱和，网络是模型的一部分。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
