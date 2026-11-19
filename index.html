@@ -918,6 +918,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">KV 缓存</span><span class="tag">TTFT</span><span class="tag">推理优化</span><span>收藏于 2026-11-20</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">82</span>《TLX：给 Triton 加上 warp-group 编排》硬件原生 GPU 编译器，GEM 训练 20-25% MFU</h3>
+  <p>TLX 是 Triton 的低层扩展，用显式 warp-group 与 cluster 级编排补上 SIMT 与分块模型之间的「缺失的中间层」：warp-group 编排、warp-group 级同步、内存编排、cluster 执行、可选布局，布局自动推断让融合变容易。GEM 训练在数千块 Blackwell GPU 上达到 20-25% 端到端 MFU，IKBO 让 RecSys 推理计算密集延迟最多降三分之二，分布式 Grouped GEMM 在大规模 LLM 预训练舰队上长期验证。</p>
+  <div class="links">
+    <a class="cn" href="pages/tlx-triton-low-level-extensions.html">中文精读 →</a>
+    <a class="en" href="https://engineering.fb.com/2026/11/10/open-source/tlx-a-hardware-native-gpu-compiler-for-production-ml/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">Kernel 优化</span><span class="tag">Triton</span><span class="tag">MFU</span><span>收藏于 2026-11-20</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
