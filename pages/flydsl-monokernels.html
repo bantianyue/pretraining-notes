@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlyDSL MonoKernel：依赖算子合进一次持久化 launch，解码提速最高 2.26 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>FlyDSL MonoKernel：依赖算子合进一次持久化 launch，解码提速最高 2.26 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vllm.ai/blog/2026-11-18-flydsl-monokernels">https://vllm.ai/blog/2026-11-18-flydsl-monokernels</a></div>
+<h1>FlyDSL MonoKernel：依赖算子合进一次持久化 launch，解码提速最高 2.26 倍</h1>
+<ul>
+<li>原文：<a href="https://vllm.ai/blog/2026-11-18-flydsl-monokernels">Keeping Agents Fast: High-Interactivity Decode with FlyDSL MonoKernels in vLLM</a>（vLLM 官方博客，2026-11-18 发表）</li>
+<li>作者：Felix Li、Lingpeng Jin、Hattie Wu 等（AMD / vLLM）</li>
+<li>主题：GPU kernel、推理优化、持久化 launch、vLLM、解码延迟、MoE</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：小批量解码的大部分时间花在核与核之间，FlyDSL MonoKernel 把互相依赖的算子收进一次持久化 launch，用核内数据就绪交接省掉整核边界的等待；vLLM 主线已合入 5 个模型，并发为 1 时交互速度最高提升 2.26 倍，精度变化在噪声范围内。</li>
+</ul>
+<h2>核心结论</h2>
+<p>交互式应用的解码延迟决定任务速度：编码 Agent 必须等当前动作生成完才能调用下一个工具，解码走在任务的关键路径上。低并发下，服务的目标是单个用户的响应速度，而不是总吞吐。</p>
+<p>一个解码步要跑一串 GPU 核，负责投影、注意力、专家计算等操作。小批量下很多核只做一点活，却每个都要付 GPU 侧的派发、启动与完成代价；依赖核必须等输入就绪才能开始，整核边界也限制了重叠。整条链重复下来，这些代价能占解码延迟的相当一部分，少量并行工作还让 GPU 容量空着。HIP 图能省掉 CPU 侧的启动开销，省不掉 GPU 侧的代价。</p>
+<p>MonoKernel 把多个互相依赖的算子阶段收进一次 GPU 核 launch，用作者显式设计的调度，而不是每个算子边界各发一次 launch。这里 mono 指一次核执行边界，不是整个模型只用一个核：一条模型的 mono 解码路径可以包含多个 MonoKernel，一个解码层也不必正好对应一次 launch。目标不只是让单个算子更快，而是缩短算子之间的等待。</p>
+<p>vLLM 主线已合入 5 个模型的 MonoKernel 解码路径：DeepSeek-V4.1-Flash、DeepSeek-V4-Pro、MiniMax-M3、Kimi-K3 与 Muse Spark，并发为 1 时交互速度或每输出 token 时间提升 1.20 至 2.26 倍；路径默认关闭，加 --monokernel 开启，不支持的部署会在启动时拒绝并列出全部原因。</p>
+<h2>解码慢在核与核之间</h2>
+<p>解码步里每个核都有启动、工作、排空三个阶段。核 A 算完、排空后，核 B 才能启动；核 B 再走同样的三段。宽度与间隙是示意，不是实测时长或开销分解，但结构是对的：小批量下工作段很短，启动与排空占的比重就很大。</p>
+<p>HIP 图（图重放）把 CPU 侧的 launch 开销压掉了，但 GPU 侧的代价还在：每次 launch 仍有 GPU 侧的派发与启动，整核边界仍要求前一段全部完成、后一段才能开始。解码链越长，重复的代价越多。</p>
+<h2>MonoKernel 如何缩短解码等待</h2>
+<p>受 TileRT 启发，这里讨论的实现用持久化 launch（persistent launch）：固定一组 GPU 线程块连续处理多个阶段。线程块是一组一起执行的 GPU 线程，所需依赖满足后可以继续做后续工作。图重放下两条路径都能跑，差别在于：多核各自独立 launch，还是一次 launch 内作者设计的持久化调度。一些整核边界变成了计算片段之间更细粒度的交接。</p>
+<p>三种省时间的办法：</p>
+<p><strong>跨阶段复用线程块。</strong>做完当前工作的线程块，不用等一次新的核 launch，就能接上下一阶段已就绪的工作，省掉重复的核启动与排空。</p>
+<p><strong>边算边读后面的权重。</strong>比如在前面计算进行时，预取输出投影或专家上行/门控权重。调度和资源允许时，一部分 HBM 流量与有效计算重叠，不再全暴露在关键路径上；权重读取并没有消失，也不能保证全部访存延迟都被藏住。</p>
+<p><strong>按消费者的需要交接数据。</strong>tile 是张量的一部分；带标签的邮箱（tagged mailbox）存着中间结果与表示就绪的标签。下游阶段或对端 GPU 上的归约，只要所需数据就绪就能开始，不用等产生阶段里不相关的工作完成；消费者仍要等齐自己计算所需的全部输入。</p>
+<h2>核边界按模型定</h2>
+<p>关键的设计难题是决定 MonoKernel 从哪里开始、到哪里结束：哪些操作共用一次 launch，哪些留在各自的核里。融更多阶段不一定更好，边界必须贴合模型的数据依赖、通信模式与 GPU 资源限制。MonoKernel 边界因此是按模型定的，不是一层一核的通用模板。</p>
+<p>DeepSeek-V4.1-Flash 的首个实现把标准解码层路径分成 K1 与 K2：</p>
+<table>
+<thead>
+<tr>
+<th>Launch</th>
+<th>Stages</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>K1</td>
+<td>mHC (hyper-connection) mixing before attention → attention front: wqkv, q/kv norms, KV-cache insert, wq_b</td>
+</tr>
+<tr>
+<td>K2</td>
+<td>attention back (split attention, combine, wo_a, wo_b) → TP all-reduce → mHC mixing before the FFN → MoE (router, top-6, shared expert, MXFP4 experts) → TP all-reduce</td>
+</tr>
+</tbody>
+</table>
+<p>K1 准备注意力输入并更新 KV 缓存；K2 完成注意力并继续走前馈，中途两次 TP all-reduce 都在核内用对称对端内存完成。这些归约按 rank 顺序以 fp32 求和，再转 bf16，并与周围工作重叠。归约放在 K2 里面，不等于通信或跨 rank 同步消失了。</p>
+<p>更窄的边界是 MiniMax-M3：首个实现只融合 FFN 部分及周围通信，注意力留在原有路径上。与 DeepSeek 的例子相比，它只把层的一部分做成 mono 执行。两个例子展示的是不同的边界选择，不是一套照搬到每个模型的固定配方。</p>
+<h2>FlyDSL 为什么贴合这种执行模型</h2>
+<p>边界与调度由核作者设计，不是选了语言就自动生成。FlyDSL 是 AMD 的 Python DSL 与 MLIR 编译器，面向高性能 ROCm 核，提供表达与编译这套设计所需的控制。作者设计，FlyDSL 编译，vLLM 选择并集成执行路径。</p>
+<p>图 4 的交接是这套机制的最小实例：块 i 算 A 阶段、把 q 存入 HBM 后举起标志 t；块 j 提前加载 B 阶段权重，轮询标志 t，标志一立就开始算 B 阶段。块 i 存下结果，等写入落盘（s_waitcnt 加屏障），再用一次邮箱写入为每个 token 举起一个标志。块 j 早已发出 B 阶段的权重加载，权重在它轮询标志时到达；标志一立，B 阶段立即开始，中间没有核边界。FlyDSL 按写出的顺序编译，不会自己融合或重排阶段。vLLM 里 DeepSeek-V4.1-Flash 的注意力前半段就是这个模式。</p>
+<p>实现细节有三条：</p>
+<p><strong>控制数据移动与同步。</strong>要让阶段重叠，必须决定工作如何在块、wave 与线程之间划分、何时发加载、何时让结果可用。FlyDSL 让作者在需要时精确到具体的缓冲与矩阵指令来表达这些选择；收益来自排出来的调度本身，不是 Python 语法。</p>
+<p><strong>按阶段匹配布局与低精度计算。</strong>投影、注意力与专家用的数据布局并不相同。FlyDSL 让作者选择每阶段如何切分与访问张量，并把低精度计算映射到 GPU 的矩阵指令上。MI355X 上 mono 实现可以直接原地读取 vLLM 已加载的权重，包括 AITER 打乱后的 MXFP4 专家布局，不用再存一份。这些控制也能帮移植，但移植不会自动完成：CDNA3 需要适合其更小共享内存（LDS）的 tile 尺寸与不同的矩阵指令路径。</p>
+<p><strong>按支持的配置专门化与编译。</strong>用 flyc.kernel 与 flyc.jit 装饰器写的核在首次使用时编译并缓存。实现针对模型、TP 尺寸与支持的步宽专门化，步宽指一次前向处理的 token 行数，含投机位置与图填充。vLLM 在预热时建好所需的步宽变体，在 HIP 图下重放。这是针对性的专门化，不是保证一套调度能服务任意模型或批量。</p>
+<h2>vLLM 里的专用解码</h2>
+<p>对 vLLM 来说，MonoKernel 路径是一条专用解码（specialized decode）：模型与硬件相关的解码前向，走 vLLM 的正常接口。调度器、KV 缓存管理、采样、投机解码与 HIP 图都不变，只有解码层跑法不同，而且只在核能服务的步上跑。每个已合入的 mono 实现都遵守 RFC 约定的规则：</p>
+<ol>
+<li><strong>默认关闭，不支持就拒绝。</strong>路径默认关闭，--monokernel 开启（等价于 --additional-config '{"decode_backend": "latency_specialized"}'，Kimi-K3 读这个配置）。核服务不了的部署会在启动时失败，并列出每一条原因。</li>
+<li><strong>模型自己管代码。</strong>核、运行时与测试都放在 vllm/models/各模型/amd/ 下。Kimi-K3 只在已有模型文件里加了 26 行，vLLM 核心一字未动。</li>
+<li><strong>每层每步，mono 或原版二选一。</strong>每步由一次 plan() 决定。预填充、混合批量与步宽超限的步走原版层；mono 层用 vLLM 的权重与 KV 缓存、返回同样的张量，所以两者可以在同一步里混用。</li>
+<li><strong>兼容 HIP 图与投机解码。</strong>捕获尺寸不变，投机验证步也可以走 mono 路径。</li>
+</ol>
+<h2>实测结果</h2>
+<p>图 5 汇总了已合入实现的评测结果，均由各自作者在 MI355X 或 MI325X 上测得；GLM-5.2 一节单独报告 RFC 在 MI350X 上的测量，不在图 5 里。AgentX 是 InferenceX 的基准，由多轮长上下文 Agent 会话构成，每个点是一次 3600 秒的运行。交互速度是 1 除以 token 间延迟（P90，未注明除外），单位是 token/秒/用户，越高越好。图 5a 是每个已合入实现在并发为 1 时相对同节点原版基线的提速，DeepSeek-V4-Pro 除外，它的对比用的是 InferenceX 已发表的历史运行。图 5b 跟踪三个做过并发扫描的实现，相对同节点原版基线。每个值都是各自实现报告的指标之比，方向都取越高越好：交互速度是 mono 除以原版，TPOT 与解码步时间是原版除以 mono。</p>
+<p><strong>DeepSeek-V4.1-Flash。</strong>首个实现把 30 个标准层跑成 K1 + K2；同一台 TP2 MI355X 节点上，打开 mono 后并发为 1 时 P90 交互速度从 318.1 升到 429.1 token/秒/用户。整个扫描里总吞吐升 1.04 至 1.16 倍，P90 首 token 延迟最多变化 0.1 秒，因为预填充不走 mono 路径。同一个实现的 FFN launch 覆盖另外 10 层，再带来 1.02 至 1.19 倍；TP4 上并发 1、2、4、8 时 P90 交互速度是 InferenceX 已发表的同配方运行结果的 1.66 倍、1.56 倍、1.64 倍、1.38 倍。后续实现把全部 40 层跑成 K1 + K2，TP4、并发 1 时达到 562.6 token/秒/用户，比早期的 mono 路径高 3.9%。</p>
+<p><strong>MI300X/MI325X 移植</strong>把一个标准解码层从 32 个核、320 微秒压到 2 个核、115 微秒。MI325X 上 TP4、AgentX 测试里，并发为 1 时 P90 交互速度从 182.25 升到 411.26 token/秒/用户，每 GPU 总吞吐升 1.63 倍；并发 2、4、8 时 P90 交互速度是 InferenceX 已发表的 MI325X 测试点的 2.41 倍、2.22 倍、1.99 倍。</p>
+<p><strong>MI355X 上 TP8</strong>时，每个 rank 流过的权重只有 TP4 时一半，K1/K2 链长度不变，所以并发为 1 时 mono 解码仍有收益。只切换 --monokernel 的一台 TP8 服务器上，带 DSpark 投机解码的解码步从 8.59 毫秒降到 5.36 毫秒（392 升到 580 token/秒）。这些步时间测量用 3.87 的合成接受长度，只为分离步时间与接受率；该 TP8 配置的精度仍在评估中。DSpark 草稿模型跑在同样的核上：三层每步约 227 微秒，而原来约 640 微秒，接受长度不变。</p>
+<p><strong>DeepSeek-V4-Pro。</strong>更大的 Pro 模型有自己的一套 mono 包，按其尺寸专门化，跑在 MI355X 的 TP8 上。AgentX 的 P50 交互速度在并发 1、4、8 时分别提升 28.7%、26.5%、11.9%，但基线是旧软件栈上的 InferenceX 历史运行，所以数字里既有核的收益，也有软件栈变化。</p>
+<p><strong>MiniMax-M3。</strong>MiniMax-M3 的 MXFP4 实现说明部分融合已经有收益：只有第 3 至 59 层的 FFN 一半（all-reduce、RMSNorm、路由、共享与路由专家、最后的 all-reduce）跑成一次 launch，注意力留在原版路径上。MI355X 上 TP4、随机 1k/1k 提示词下，并发为 1 时 TPOT 从 5.12 毫秒降到 4.27 毫秒。M3 与 M3.1 的全层 mono 解码也在融合注意力与稀疏索引器，正在评审中。</p>
+<p><strong>Kimi-K3。</strong>Kimi-K3 混合了 KDA 线性注意力层与 MLA 层。首个实现把 KDA 层跑成 K1 + K2，把 MLA 层的输出投影与 MoE 跑成 K2；后续实现补上 MLA 序幕与尾声核，并在不做解码上下文并行（DCP1）时把 FlyDSL 的 MLA 解码注意力阶段融进 K2，一个 MLA 层只要两次 launch。MI355X 上 TP8、并发 1、7 个投机 token 时，8k 输入下 P50 TPOT 从 5.47 毫秒（原版）降到 4.35 毫秒，再降到 3.44 毫秒（1.59 倍）；64k 输入下从 5.67 降到 3.58 毫秒（1.58 倍）。原版与第一组数字是已发表结果，第二组数字是两次运行的均值。</p>
+<p><strong>Muse Spark。</strong>Muse Spark Open MXFP4 把每次 DSpark 验证步的第 1 至 60 个解码层跑成持久化 launch，8 块 MI355X、TP8 加专家并行，测的是 AgentX 的 Agent 编码轨迹（输入中位数 159k token）。基线是并发为 1 时该配方的原版 TP8 配置，并发为 8 时是原版 TEP8 配置（TP8 加专家并行，与 mono 运行一致），中间取两者较快的那个。并发为 1 时交互速度从 263.1 升到 413.8 token/秒/用户，整个扫描里每 GPU 总吞吐升 21% 至 29%。</p>
+<p><strong>GLM-5.2（RFC 测量）。</strong>RFC 里的测量在 8 块 MI350X 的 TP8 上跑了 GLM-5.2-MXFP4 的 MonoKernel，现正评审中。vLLM 里一次图模式解码步从约 2459 个核降到约 210 个（75 次 MonoKernel launch 加上稠密层、输入准备与 head），默认 BF16 注意力下每 token 时间在批量为 1 时从 13.70 毫秒降到 5.92 毫秒（2.31 倍，FP8 注意力下 2.85 倍），批量为 8 时从 17.33 降到 11.44 毫秒（1.51 倍）。AgentX 上用 FP8 注意力时，token 间时间在 1 个用户时从 15.0 降到 6.5 毫秒（2.31 倍），8 个用户时从 20.4 降到 12.7 毫秒（1.61 倍）。</p>
+<h2>精度</h2>
+<p>融合核的量化、累加与归约顺序与原版路径不同，所以每个模型与配置都要在同一台服务器上开关 mono 各测一次，单独评估精度。下面这些配置的差异都在噪声范围内：</p>
+<ul>
+<li>DeepSeek-V4.1-Flash，TP2（RFC 协议，按题配对）：GPQA-Diamond 85.3 变 85.1（变化 -0.2 ± 0.6），AIME25 99.4 变 98.3（变化 -1.0 ± 0.7），RULER NIAH 每格 40/40 全过。</li>
+<li>DeepSeek-V4.1-Flash，MI325X：GSM8K 92.5 变 92.7（p = 0.49）。</li>
+<li>MiniMax-M3：GSM8K 89.7 变 90.5（p = 0.37）。</li>
+<li>Kimi-K3：GSM8K 96.0 变 96.3，GPQA-Diamond 92.4 变 93.9；打开 mono 后 RULER NIAH 在 256K 以内每个长度都得 1.0。</li>
+<li>Muse Spark（RFC 协议）：GPQA-Diamond 88.5 变 88.7，AIME25 98.3 变 98.6。</li>
+</ul>
+<p>每个配置的完整结果见链接的实现。端到端评估之下，mono 层还要对照 vLLM 自己的算子链与精确的 fp32 参考做测试，例如 DeepSeek-V4.1-Flash 每 token 余弦相似度不低于 0.999，300 次 HIP 图重放结果逐位相同。</p>
+<h2>上手试用与适用边界</h2>
+<p>自 2026 年 10 月起，mono 解码已合入 vLLM 主线，覆盖 MI355X 上的 DeepSeek-V4.1-Flash、DeepSeek-V4-Pro、MiniMax-M3、Kimi-K3 与 Muse Spark，DeepSeek-V4.1-Flash 还覆盖 MI325X。GLM-5.x、Qwen3.8 与 MiniMax-M3.1 的移植正在评审中。mono 解码默认关闭，支持的配方加 --monokernel 即可开启。如果部署不受支持，vLLM 会拒绝启动并列出每一条原因。每个模型支持的配置写在其 vllm/models/各模型/amd/ 包里。</p>
+<p>mono 解码是延迟优化，有三条限制：</p>
+<ol>
+<li><strong>低并发下收益最大。</strong>收益在并发为 1 时最大，并发越高越小。DeepSeek-V4.1-Flash 的 TP8 mono 解码是并发为 1 的配置：并发为 4 时，一台 TP8 服务器的吞吐比两台 TP4 副本低 26%。</li>
+<li><strong>步宽有限。</strong>投机 token 与图填充都计入上限：MI355X 上 DeepSeek-V4.1-Flash 最多 48 行（MI325X 上 42 行，LDS 更小），MiniMax-M3 与 Kimi-K3 是 16 行。更宽的步走原版路径。</li>
+<li><strong>MI300X/MI325X 上要多存一份权重。</strong>没有放缩 FP4/FP8 MFMA 时，核自己留一份权重副本：DeepSeek-V4.1-Flash 在 TP4 下每 rank 是 170 GiB 而不是 99 GiB。MI325X 上仍留得出大 KV 缓存，MI300X 上余地很小。</li>
+</ol>
+<h2>启示</h2>
+<p>这篇的通用教训是：小批量解码的瓶颈不在单个算子，而在算子之间的等待。持久化 launch 把“等整段完成”换成“等所需数据就绪”，三处收益——复用线程块、预取权重、按需交接——都来自调度，不来自更快的单算子。边界必须按模型定：DeepSeek 分 K1/K2 两段，MiniMax 只融 FFN 一半，Kimi 按 KDA/MLA 分层处理；没有一层一核的通用模板。</p>
+<p>对写推理核的人，三个可复用的点：交接粒度按消费者需要定（带标签的邮箱 + 每 token 一个标志）；归约可以放进核内做（fp32 按 rank 顺序求和再转 bf16，与周围工作重叠）；集成时保持原版路径可混用（每层每步二选一、同一套权重与 KV 缓存），新路径才敢默认关闭、逐步合入。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
