@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>生成一个 token，99% 的时间在等内存：小模型快不是因为算得少 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>生成一个 token，99% 的时间在等内存：小模型快不是因为算得少</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://medium.com/@baymuratabdimuratov/small-models-arent-fast-because-they-do-less-math-14dd07d69c3b">https://medium.com/@baymuratabdimuratov/small-models-arent-fast-because-they-do-less-math-14dd07d69c3b</a></div>
+<h1>小模型快不是因为算得少：生成一个 token，99% 的时间在等内存</h1>
+<ul>
+<li>原文：<a href="https://medium.com/@baymuratabdimuratov/small-models-arent-fast-because-they-do-less-math-14dd07d69c3b">Small Models Aren't Fast Because They Do Less Math</a>（Medium，2026-11-11 发表）</li>
+<li>作者：Baymurat Abdimuratov</li>
+<li>主题：内存墙、算术强度、解码速度、批量化、KV 缓存、推理优化</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：H100 读 1 个字节的时间够做约 300 次数学运算，生成一个 token 只做约 1 次运算；单用户解码 99% 的时间在等权重到达，小模型快是因为要读的字节少；批量化让一份权重给更多用户共用，约 512 用户才跑满算力。</li>
+</ul>
+<h2>核心结论</h2>
+<p>大语言模型给单个用户生成一个词时，GPU 超过 99% 的时间什么都不做，只在等数据从内存到达。H100 读 1 个字节的时间够做约 300 次数学运算，生成一个 token 只做约 1 次运算。1995 年 Wulf 与 McKee 的《撞上内存墙》就预言过：处理器变快的速度远超内存，处理器大部分时间都在等数据，算得再快也没用。三十年后，同一堵墙回来了，而且更大，这次它坐在运行大语言模型的 GPU 里面。</p>
+<h2>时间花在哪：三个桶</h2>
+<p>Horace He 的心智模型：GPU 花在模型上的每一毫秒都落进三个桶之一。计算：真正做数学的时间；内存带宽：在 GPU 内存与计算单元之间搬数据的时间；开销：其余一切，Python、核启动、框架记账。哪个桶重要，比总数重要：卡在内存桶里，加算力没用，必须搬更少的字节。</p>
+<h2>工厂与仓库</h2>
+<p>想象一家满是快速机器人的大工厂：机器人是 GPU 的计算单元，原材料住在城另一头的仓库里，也就是 GPU 的内存，一条窄路连着两边。每年工厂多一批机器人，路也变宽，但慢得多，机器人越来越多时间站着不动，等卡车。这就是内存墙：解法从来不是更多机器人，是每个产品少用几辆卡车，或每辆卡车多装几个产品。</p>
+<h2>数学跑得比内存快</h2>
+<p>从 V100（2017 年）到 H100（2022 年），峰值数学从 125 升到 989 TFLOPS，约快 7.9 倍；内存带宽从 0.9 升到 3.35 TB/s，约快 3.7 倍。有用的数字是比值：H100 每秒能做约 989 万亿次运算，但每秒只能读 3.35 万亿字节，也就是每字节约 300 次运算。活儿每读 1 字节做不到约 300 次运算，GPU 就在等内存。这个比值叫算术强度，是理解解码速度上限最有用的数字。</p>
+<h2>生成一个 token 为什么受内存限制</h2>
+<p>拿一个 8B 参数模型，按 BF16 存（多数大语言模型用的 16 位数字格式），每个参数 2 字节，权重占 16GB。给一个用户生成一个 token，GPU 把每个权重读一遍、每个权重做约 2 次运算（一个乘法一个加法）：数学是 160 亿次运算，989 TFLOPS 下约 0.016 毫秒；读数是 16GB，3.35 TB/s 下约 4.8 毫秒。数学比读数快 300 倍，GPU 超过 99% 的时间在等权重到达；这也给单用户定了约每秒 200 token 的硬上限，核写得再好也没用。按算术强度算，这活儿每字节约做 1 次运算，硬件要约 300 次。</p>
+<h2>批量化是绕过内存墙的办法</h2>
+<p>权重对每个用户都一样，同时服务很多用户，每份权重读一遍、给所有人用：一辆卡车，多个产品。8 个用户时 GPU 用约 3% 的数学算力，64 个用户时约 22%，约 512 个用户时活儿终于变成计算受限。这就是推理服务商拼命批量化的原因，也是请求会在队列里等几毫秒才开始的原因。但有个问题：每个用户还有 KV 缓存，是他们前面 token 的 key 与 value，缓存只属于一个用户，批量化共享不了；上下文一长，读 KV 缓存成了新的瓶颈，内存墙又回来了。</p>
+<h2>对用 LLM API 的人意味着什么</h2>
+<p>可能永远不写核，内存墙照样决定了看到的东西：小模型快，主要是因为要读的字节少，不是因为算得少；首 token 时间里有排队，因为服务商想把批量填满；便宜的批量档存在，因为只有批量满了，服务商才用得满 GPU。下次模型感觉慢，别问它要多少 FLOPs，问它要搬多少字节。</p>
+<h2>启示</h2>
+<p>这篇的通用教训是：单用户解码的上限不在算力，在内存带宽，一次除法就能估出来——权重字节数除以带宽。想让 GPU 忙起来，办法是批量化：一份权重给更多用户共用，8 用户用 3% 的算力，约 512 用户才跑满。但 KV 缓存每人一份、不能共享，长上下文时读 KV 缓存成了新的瓶颈。速度来自搬更少的字节，不是来自更少的数学；评估模型速度时，先算算术强度，再看批量大小与上下文长度。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
