@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV 缓存溢出 PCIe：32K 上下文回读只要 27 毫秒，重算却要 1.5 到 2.5 秒 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>KV 缓存溢出 PCIe：32K 上下文回读只要 27 毫秒，重算却要 1.5 到 2.5 秒</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://pub.towardsai.net/when-the-kv-cache-spills-over-pcie-996781bd7658">https://pub.towardsai.net/when-the-kv-cache-spills-over-pcie-996781bd7658</a></div>
+<h1>KV 缓存溢出 PCIe：32K 上下文回读只要 27 毫秒，重算却要 1.5 到 2.5 秒</h1>
+<ul>
+<li>原文：<a href="https://pub.towardsai.net/when-the-kv-cache-spills-over-pcie-996781bd7658">When the KV Cache Spills Over PCIe</a>（Towards AI，2026-11-17 发表）</li>
+<li>作者：Srinivas Kodali</li>
+<li>主题：KV Cache、推理优化、PCIe、显存管理、vLLM、长上下文</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：一台 8 卡 H100 服务器、200 个 32K 上下文用户，Llama 3.1 70B 每人带 10.7GB KV 缓存，显存只装得下约 37 人；单个用户从 CPU 内存经 PCIe 回读只要 27 毫秒，比重算快 50 倍以上，但负载一上来 PCIe 就变成队列，500 毫秒预算内满速也只能接住约 18 个同时回来的用户。</li>
+</ul>
+<h2>核心结论</h2>
+<p>长上下文服务里，KV 缓存是批量搬运最大的东西。GPU 写 token 时 PCIe 大多空闲，只有缓存溢出、要把大块数据搬回来时，PCIe 才成为瓶颈。贯穿全文的例子：Llama 3.1 70B 由 vLLM 服务，跑在 DGX H100 级别的服务器上，200 个活跃会话、平均每人 32K token 上下文。</p>
+<p>每 token 的 KV = 2（key + value）× 80 层 × 8 个 KV 头 × 128 维 × 2 字节 = 327,680 字节，BF16 下约 320KB，FP8 下 160KB。32K token 的用户带 10.7GB 缓存；200 人要 2.15TB，约 400GB HBM 只装 37 人，其余 163 人要么丢弃重算、要么停到 CPU 内存或 SSD 再拿回来。FP8 把总量减半到 1.07TB，HBM 加 CPU 内存就装得下，不用 SSD。</p>
+<h2>溢出路径：每远一步，容量增、带宽降</h2>
+<p>停放的 KV 缓存沿一条梯子往下走：</p>
+<ul>
+<li>GPU 显存（HBM3）：3,350GB/s 每卡；每卡 80GB，共 640GB；热用户，现在活跃的。</li>
+<li>CPU 内存（DDR5）：约 50GB/s 每卡，经 PCIe 回来；2TB，8 卡共享；温用户，暂停了的。</li>
+<li>本地 NVMe SSD：每 Gen4 盘约 6GB/s（8 盘约 50GB/s）；8 × 3.84TB，约 30TB；冷用户，很久没来的。</li>
+</ul>
+<p>PCIe Gen5 ×16 纸面每方向 64GB/s，实测约 50GB/s，比 HBM 窄约 67 倍；SSD 每盘再窄 8 倍。vLLM 团队在 H100 上测到约 50GB/s 的单向峰值，Red Hat 在 H100 推理测试里测到 6.2GB/s 的 NVMe 读取。</p>
+<h2>回读比重算快 50 倍以上</h2>
+<p>一个用户五分钟后回来，32K token 的 KV 缓存已被停放。8 卡张量并行下每卡只存八分之一缓存，每卡经自己的 PCIe 链路拉 1.34GB，8 卡同时拉。带回一个用户、首个新 token 之前的时间：</p>
+<ul>
+<li>从 CPU 内存回读：27 毫秒。</li>
+<li>从 CPU 内存回读、两卡共享一条上行：54 毫秒。</li>
+<li>从 8 块本地 SSD 回读：0.22 秒。</li>
+<li>空闲服务器上重算：约 1.5 到 2.5 秒。</li>
+</ul>
+<p>CPU 内存回读比重算快 50 倍以上，SSD 路径也至少快 7 倍。</p>
+<h2>重算到底要多久</h2>
+<p>预填充工作量 ≈ 2 × 参数 × token + 2 × 层 × 隐藏层尺寸 × token²。32K token 的 Llama 3.1 70B 算下来约 4.6 + 1.4 = 6.0 PFLOP。8 块 H100 的稠密 BF16 峰值是 7.9 PFLOP/s，每卡 989 TFLOP/s（数据表上的 1,979 TFLOP/s 假设稀疏，稠密模型用不上）。按峰值算重算要 0.76 秒，但真实预填充跑不到峰值：矩阵乘法从不让每个 Tensor Core 都忙起来；注意力随上下文平方增长、跑得比普通矩阵乘法低效；归一化、softmax 与激活等小步骤算术量不大但照样花时间；分块预填充增加核启动次数、还要重读前面的 KV；8 卡每层之后经 NVLink 同步，FLOP 数里不含这一项。合起来空闲服务器上的重算大约 1.5 到 2.5 秒，FP8 大致减半。</p>
+<p>负载一上来重算慢得多：排在其他用户的预填充后面，还要跟他们的解码步骤共享 GPU。LMCache 在 8 卡 H100、100 个聊天会话、每人只有 12K token、CPU 缓存很小的条件下测到，首 token 时间 P50 为 4.5 秒，P90 为 8.3 秒。重算还有一笔隐藏成本：它的每一秒，都是从正在生成 token 的用户手里抢走的 GPU 时间。</p>
+<h2>真实负载下什么会坏</h2>
+<p>上面 27 毫秒是最好的情况：一个用户、一条空闲总线、调好的代码。生产环境还要加流量、拓扑与磨损，9 个问题：</p>
+<ol>
+<li><strong>回归风暴把 PCIe 变成队列。</strong>用户不是一个一个回来的。20 个用户一起回来，每卡要在最后一个用户看到 token 之前拉 20 × 1.34GB = 27GB。满速 50GB/s 时约 18 个用户占满 500 毫秒预算；15GB/s 的持续速率下只有 5 个用户能进预算（该速率是一项研究在 H100 服务器上测到的持续值）；25GB/s（两卡共享一条上行）时是 9 个用户。FP8 让这些数字都翻倍。</li>
+<li><strong>链路是共享的。</strong>每卡经一个 PCIe 交换机连网卡，有的服务器把两卡放在一个交换机上。网络流量、存储读取与 KV 回读争同一批通道；三种流量（KV 回读 CPU→GPU、KV 回写 GPU→CPU、网络与存储流量经 GPUDirect RDMA）共享一颗 GPU 约 64GB/s 的 ×16 链路。</li>
+<li><strong>两个方向互相拖累。</strong>卸载把新 KV 写进 CPU 内存，回读同时把旧 KV 拉回来。PCIe 纸面上是全双工，但主机侧的限制会让两个方向互相拖慢。先用 nvbandwidth 同时测两个方向，再信单向数字。</li>
+<li><strong>小传输浪费总线。</strong>vLLM 把 KV 存成 16 token 的块。旧布局里 Llama 3.1 70B 的一个块每层只有 8KB，拷贝引擎不擅长小拷贝；新布局把全部层打进一个 1.25MB 的块，卸载吞吐提高约 10 倍。</li>
+<li><strong>一块慢卡定全队速度。</strong>张量并行下只有 8 卡全部完成，一次回读才算完成。一条半宽链路或老一代 PCIe 会拖慢每个用户。8 卡的链路速度与宽度都要查，不只查一卡。</li>
+<li><strong>缓冲区落在错的 CPU 上。</strong>GPU 的固定主机缓冲区如果落在远端 CPU 插槽上，每次拷贝都要跨插槽链路。nvidia-smi topo -m 把这条路标为 SYS，是最慢的一种 GPU 路径。</li>
+<li><strong>SSD 会磨损、会坏。</strong>Micron 7450 PRO 这类读密集型盘按每天一次全盘写入标称，8 块 3.84TB 盘每天能吸收约 31TB；持续 1GB/s 的 KV 写入每天是 86TB，盘不到 2 年就磨完，而不是 5 年。DGX H100 的数据盘还做成 RAID 0，一块盘坏掉整层就空了，重启意味着冷缓存。</li>
+<li><strong>请求错过明明存在的缓存。</strong>多副本下回来的用户可能落到从没见过他 KV 缓存的副本上，系统照样重算。4 个副本加普通轮询路由，回来的用户只有 1/4 概率落在对的服务器上，约 75% 的回来轮次白白重算。粘性路由或 KV 感知路由能修好。</li>
+<li><strong>停放的 KV 是用户数据。</strong>KV 缓存是用户对话的工作副本，落盘之后跟聊天记录要遵守同样的加密与删除规则。DGX H100 的数据盘自带加密，有帮助，但保留规则还是自己的事。</li>
+</ol>
+<h2>什么时候卸载，什么时候不卸载</h2>
+<p>上下文回来，卸载才划算；上下文不回来，卸载只烧带宽。按负载分：</p>
+<table>
+<thead>
+<tr>
+<th>负载</th>
+<th>典型上下文</th>
+<th>复用</th>
+<th>KV 缓存应该住哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>短问答、分类</td>
+<td>2K 以下</td>
+<td>低</td>
+<td>只放 HBM；不卸载</td>
+</tr>
+<tr>
+<td>多轮聊天</td>
+<td>4K 到 32K</td>
+<td>高</td>
+<td>HBM + CPU 内存</td>
+</tr>
+<tr>
+<td>共享文档上的 RAG</td>
+<td>8K 到 64K</td>
+<td>高（共享前缀）</td>
+<td>HBM + CPU 内存；热门文档放 SSD</td>
+</tr>
+<tr>
+<td>编码与 Agent 会话</td>
+<td>32K 到 128K+</td>
+<td>非常高</td>
+<td>HBM + CPU 内存 + SSD</td>
+</tr>
+<tr>
+<td>一次性长文档</td>
+<td>约 128K</td>
+<td>无</td>
+<td>只放 HBM；用 FP8 KV 塞下</td>
+</tr>
+</tbody>
+</table>
+<p>复用是决定性的数字。上下文越长，重算越贵，长上下文即使只有一部分会话回来，卸载也划算。</p>
+<h2>启示</h2>
+<p>这篇的通用教训是：KV 缓存溢出不可怕，可怕的是不知道它在哪、回来要多久。单用户、空闲总线时，27 毫秒的回读比重算快 50 倍以上，FP8 再把每个数字减半；但负载一上来，PCIe 就变成队列，500 毫秒预算很快占满。多数修复归结为一句话：用 FP8 KV、大块、本地 CPU 插槽与已知的 PCIe 拓扑，让更少、更大的字节走对的路。部署前先测三样东西：单卡与多卡同时回读的实际带宽、两个方向同时跑的带宽、以及 nvidia-smi topo -m 里的链路拓扑。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
