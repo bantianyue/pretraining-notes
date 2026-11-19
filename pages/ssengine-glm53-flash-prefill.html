@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SSEngine流水线并行prefill:分层前缀缓存 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SSEngine流水线并行prefill:分层前缀缓存</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://servingstudio.cs.washington.edu/blog/ssengine-glm53-flash/">https://servingstudio.cs.washington.edu/blog/ssengine-glm53-flash/</a></div>
+<h1>SSEngine：GLM-5.3-Flash 的流水线并行 prefill，分层前缀缓存</h1>
+<ul>
+<li>原文：<a href="https://servingstudio.cs.washington.edu/blog/ssengine-glm53-flash/">SSEngine-GLM5.3-Flash: Pipeline-Parallel Prefill with Tiered Prefix Caching for Agentic Workloads</a>（ServingStudio，华盛顿大学，2026-11）</li>
+<li>开源：<a href="https://github.com/SyFI-ServingStudio/SSEngine-GLM5.3-Flash">SSEngine-GLM5.3-Flash</a>；仿真器 <a href="https://github.com/SyFI-ServingStudio/ServingStudio">ServingStudio</a></li>
+<li>一句话要点：面向智能体负载的 prefill 引擎，四卡流水线并行 + HBM/DRAM/SSD 三层前缀缓存 + 最短剩余 prefill 优先调度，AgentX 上请求率达到最佳基线的 3.1 倍，TraceLab 回放上 3.2 倍，预填充 1000 个请求的 GPU 成本约是 API 价格的 1/25。</li>
+</ul>
+<h2>负载：输入长、输出短</h2>
+<p>编码智能体每轮把整个对话当输入发出去，几万到几十万 token，输出只有几百 token。TraceLab 的会话里，提示词共 52.56B 个缓存 token + 2.34B 个新 token，输出只有 186.9M 个。中位提示词 154k token，中位追加只有 1.2k token；AgentX 里两个中位数是 74k 与 1.9k token。</p>
+<p>工作量分布极不均匀：追加量最大的 1% 轮次扛了全部追加 token 的 20%。这类轮次出现在会话开始、智能体压缩上下文、服务器丢了缓存前缀时，要预填充几万 token。</p>
+<p>TTFT（首 token 时间）对智能体是平均值指标而非尾延迟指标：每轮都要等一次，小的系统性延迟在每轮重复出现。</p>
+<p>Prefill 与 decode 分离：两阶段同放时，长 prefill 卡住同批 decode 步、抬高 TPOT；反过来限制 prefill 又抬高 TTFT。PD 分离把两阶段放不同 GPU，各自按目标选并行、批处理与调度。SSEngine 是 prefill 一侧：预填充每个提示词、返回第一个 token。</p>
+<h2>模型：GLM-5.3-Flash，两种注意力、两种缓存状态</h2>
+<ul>
+<li>320B 参数 MoE，每 token 激活 18B；45 层，前 3 层稠密前馈，其余 42 层每 token 路由到 288 个专家中的 8 个，加 1 个共享专家。</li>
+<li>注意力分两种：11 层 DSA（DeepSeek 稀疏注意力，每 query 关注 2048 个选定历史 token），每第四层（第 3、7、直至 43 层）是 DSA 层；其余 34 层 KDA（Kimi Delta Attention，线性注意力）。</li>
+<li>检查点：路由专家存 4-bit NVFP4，188.4 GB，超过单块 B200 的 180 GB 显存；支持最长 1M token 上下文。</li>
+<li>DSA 层按 token 存 KV，合计约 6.0 KB/token，随长度增长；KDA 层每层一个固定大小状态，与长度无关。中位提示词处 KV 占 0.92 GB，一份 KDA 状态（每 KDA 层一个）占 148 MB，约等于 25k token 的 KV。</li>
+<li>续跑行为不同：DSA 能在前缀任意 token 后续跑；KDA 每次更新覆写状态，只能在状态保存过的 token 处续跑。缓存既要留每上下文的 KV，也要在下一轮续跑的 token 处保存状态。</li>
+</ul>
+<h2>四种并行：流水线并行浪费最少</h2>
+<p>单卡核构成（前缀 ≤128k 时时间几乎只取决于新 token 数）：KDA 投影 GEMM、MoE 专家、KDA 递推注意力三家族占 61-66%。例外是 DSA indexer（为每个新 token 给每个历史 token 打分），份额随前缀增长：无前缀约 3%，512k 前缀时约四分之一；mHC 四流残差混合核占 6-7%。</p>
+<p>2 万条 TraceLab 请求满载、每请求只预填充新 token，四块 GPU 的 GPU 时间：</p>
+<table>
+<thead>
+<tr>
+<th>设计</th>
+<th>GPU 时间</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>四块理想 GPU</td>
+<td>1564 GPU·s</td>
+<td>基准</td>
+</tr>
+<tr>
+<td>PP</td>
+<td>1633 GPU·s</td>
+<td>只差 5%，唯一额外成本是流水线气泡</td>
+</tr>
+<tr>
+<td>DP+EP</td>
+<td>1812 GPU·s</td>
+<td>每 MoE 层两次同步等待 + 派发/合并流量，共加 201 GPU·s</td>
+</tr>
+<tr>
+<td>TP+EP</td>
+<td>3571 GPU·s</td>
+<td>注意力切法与 TP+TP 相同</td>
+</tr>
+<tr>
+<td>TP+TP</td>
+<td>3708 GPU·s</td>
+<td>核切分不提速 + 每层两次 all-reduce（385 GPU·s，约 PP 总时间的四分之一）</td>
+</tr>
+</tbody>
+</table>
+<p>TP+TP 的核效率损失：KDA 递推注意力只快 1.9 倍、MoE 专家只快 2.4 倍（理想 4 倍）；DSA indexer 与 mHC 核在每块 GPU 上全量跑，稀疏注意力用四分之一的头与全部头耗时差不多，这些核花的 GPU 时间约是 PP 下的四倍。</p>
+<p>PP 的气泡：45 层分四段多出一层，SSEngine 把它给 stage 0（前三层是稠密前馈层，比 MoE 便宜），切分 12/11/11/11；vLLM 默认 11/11/12/11 把多出的一层给了全是 MoE 的 stage 2。SSEngine 切分下气泡只花 69 GPU·s（约 4%），8 小时仿真里请求率比 vLLM 切分高 2.5%，平均 TTFT 从 4.8 秒降到 4.3 秒。</p>
+<p>吞吐（前缀缓存足够大时）：PP 持续 49.1 请求/秒，达到理想 GPU（51.2 请求/秒）的 96%；DP+EP 44.2；TP+TP 21.5；TP+EP 22.4。低负载时 PP 的 TTFT 反而高（0.5 请求/秒时 PP 约 61 毫秒、TP 设计 32 毫秒、理想 GPU 15 毫秒），但 30 毫秒差别用户察觉不到；约 12 请求/秒以上，PP 在每个速率上都有最低中位 TTFT（40 请求/秒时 PP 0.39 秒，DP+EP 0.83 秒）。长提示词在 PP 下更快：切成块依次过各 stage，四块 GPU 同时处理。</p>
+<h2>分层前缀缓存：HBM、DRAM、SSD</h2>
+<p>中位提示词处的上下文约 1.2 GB（含两份 KDA 状态）；扣掉权重后一块 B200 剩约 100 GB 显存给上下文，四块合起来只装约 330 个上下文，远少于活跃会话数。</p>
+<p>1500 会话 8 小时仿真（每 GPU 150 GB DRAM + 8 TB SSD）：HBM 与 DRAM 几秒内填满；SSD 8 小时后每 GPU 存 2.9 TB，达到 HBM 所存的 29 倍，还在上涨。返回轮次 20.7% 在 HBM 找到、55.6% 在 DRAM、23.6% 在 SSD。没有 SSD，同一集群崩溃：吞吐从约 55 请求/秒掉到 1 以下。</p>
+<p>AgentX 真机（三种缓存大小）：128 智能体以内三种表现相同；256 时只用 HBM 的命中率 89%、吞吐 12.5 请求/秒，更大缓存下 94% 与 15.0；512 时只用 HBM 掉到 60% 与 4.7，加 DRAM 后 88% 与 13.7，只有加 SSD 才保持 94%、吞吐升到 24.0 请求/秒。SSD 层服务的请求率达到 HBM 加 DRAM 的 1.8 倍。</p>
+<p>两层规则相反：</p>
+<ul>
+<li><strong>DRAM 独占</strong>：HBM 与主机 DRAM 容量差不多（约 100 GB 对 100-150 GB），存副本增加不了多少容量。图 12a 那轮里每 GPU 150 GB DRAM 中 135 GB 存上下文，两层合计每 GPU 约 235 GB 上下文（对副本式 135 GB）。代价是多写：上下文从 DRAM 读回后离开 DRAM，HBM 再逐出时要整段重写，平均每 GPU 14.6 GB/s（每天 1260 TB）；DRAM 写不坏，链路也装得下。</li>
+<li><strong>SSD 包容</strong>：SSD 容量有富余，保留副本避免同一份 KV 写两次。返回轮次只扩展上下文，SSD 已存的 DSA KV 仍然有效；逐出时只写新 token 的 KV 与新的 KDA 状态。</li>
+</ul>
+<p>SSD 写入量仍大：每 GPU 0.76 GB/s，即每天 66 TB；按 8 TB SSD 算约每天 8 次全盘写入，额定值是五年内每天 1-3 次。只有最大的盘能勉强承受：66 TB 在 122.88 TB 盘（DapuStor R6060，额定 0.6 次）上是每天 0.54 次全盘写入。写入的大头是 KDA 状态：返回轮次平均新增约 2.7k token，新 KV 每 GPU 约 4 MB，新 KDA 状态却占 37 MB。可选地把 KDA 状态量化存储（小值 fp16、其余 fp32），仿真里削减 SSD 写入 35-45%，降到每天约 36-43 TB。</p>
+<p>读带宽：服务图 12a 的负载，四 GPU 从 DRAM 读 39 GB/s、从 SSD 读 18 GB/s；每 GPU 平均以 14.3 GB/s 从主机向 HBM 拷贝，远在四卡同时拷贝时 48 GB/s 的能力以内；每 GPU 平均从 SSD 读 4.6 GB/s，忙时达到仿真允许的 10 GB/s，单块 PCIe Gen5 NVMe 盘约读 14 GB/s。</p>
+<p><strong>每会话存几个 KDA 状态</strong>：复用前面上下文的轮次里，TraceLab 上 99.98%、AgentX 上 92% 以整个前一个提示词开头，所以只在提示词末尾保存状态。只留一个状态（k1）时，TraceLab 额外 prefill 只有 1.6%，AgentX 上却达到 135%（8% 的轮次不以整个前一提示词开头，要重算整个上下文；其中有些只因 trace 按 64 token 块哈希提示词，末尾小改动改变了最后一个块）。默认再留第二个状态（k2，即最新轮次续跑所用的那个状态，存在它之前那个提示词的末尾），AgentX 额外 prefill 降到 39%。</p>
+<p><strong>实现三点</strong>：</p>
+<ol>
+<li><strong>各 stage 间均衡存储</strong>：把一会话 KV 缓存的每个部分切成四等份，每 GPU 一份；每 GPU 经自己的 PCIe 链路读进 HBM，再经 NVLink 把属于其他 stage 的份送过去（NVLink 比 PCIe 快十倍以上）。</li>
+<li><strong>KV 缓存走拷贝引擎，元数据走核</strong>：拷贝引擎不用计算单元，拷贝期间 prefill 全速跑；每微批次前的小块元数据用直接读主机内存的小 GPU 核拷贝，避免在拷贝引擎上排队；SSD 写入让位于读取。</li>
+<li><strong>异步加载</strong>：轮次在加载队列里等 KV 缓存落地，不进微批次组建；单独的加载通道按调度器顺序启动读取，读进 HBM 里保留 10% 的加载区，读取永不等逐出腾地方。没有加载区时，400 个 TraceLab 会话真机上吞吐掉了 12%。</li>
+</ol>
+<h2>调度：最短剩余 prefill 优先 + 60 秒规则</h2>
+<p>FCFS 下，一个只有 23 个新 token 的轮次在一个 840k 新 token 的提示词之后 4.3 秒到达，等了 4.1 秒才进第一个微批次，TTFT 5.4 秒；新 token 不到 2k 的中位轮次只等 0.36 秒。</p>
+<p>SSEngine 先跑剩余 prefill 最短的轮次，长提示词给短轮次让路，哪怕已经开始。只按最短先跑会饿死长提示词：真机上一个 32k token 的提示词落在一串稳态 1k token 提示词中间，最短优先下 TTFT 109 秒，FCFS 下 0.41 秒。所以加 60 秒规则：任何等了 60 秒的轮次都进下一个微批次。</p>
+<p>微批次大小跟随负载：积压低于 1M token 时最多 4096 token；1M 到 3M 之间上限线性长到 32768 token；每个微批次还封顶在积压的四分之一， token 平均分到四个微批次，每 stage 一个，减少气泡，也把长提示词拆到连续微批次。</p>
+<p>调度器收益（8 小时仿真，1000-1750 会话）：饱和以下平均 TTFT 削减 3-6 倍：1000 会话时从 1.13 秒降到 0.18 秒；1200 会话时从 1.72 秒降到 0.53 秒，中位数从 1.18 秒降到 0.20 秒；1200 会话时请求率多 8%。需预填充 10 万 token 以上的轮次只占 0.2%：1000 会话时中位 TTFT 只从 2.4 秒升到 3.4 秒；1200 会话时从 2.7 秒升到 19 秒，60 秒规则把每个长提示词的 TTFT 都压在 77 秒以下；没有规则时一个长提示词等了 1310 秒，三个在运行结束时还在等，1750 会话时一个达到 26130 秒。接近饱和时（1750 会话）平均 TTFT 在 FCFS 下 12.7 秒、SSEngine 下仍有 10.1 秒，调度器替代不了容量。</p>
+<h2>评测：3.1 倍与 3.2 倍，成本约 API 的 1/25</h2>
+<p><strong>AgentX 真机</strong>（四块 GB200，每点 30 分钟）：64 智能体时每系统约 4 请求/秒；基线最高是 SGLang PP，256 智能体时 7.7 请求/秒，中位 TTFT 22 秒；SSEngine 512 智能体时 24.0 请求/秒，达到 3.1 倍，中位 TTFT 1.7 秒；512 智能体时每个基线不到 3 请求/秒；768 时 SSEngine 也过载（中位 TTFT 超 60 秒）。512 智能体时 SSEngine 从缓存读 94% 的提示词 token，基线最多 75%。</p>
+<p><strong>TraceLab 回放真机</strong>（四块 B200，每档 20 分钟取第 10-20 分钟）：50 会话时三系统 4.6-4.9 请求/秒，但 SSEngine 中位 TTFT 0.09 秒，vLLM DP+EP 0.76 秒、TP+TP 0.35 秒；vLLM DP+EP 在 200 会话时达到最高 12.6 请求/秒（中位 TTFT 5.2 秒），400 会话时掉到 4.6；SSEngine 400 会话时 40.5 请求/秒，达到 3.2 倍，中位 TTFT 0.60 秒。</p>
+<p><strong>四种设计 8 小时模拟</strong>（同缓存同调度器）：99 分位 TTFT 6 秒时，PP 每 GPU 约服务 12.5 请求/秒，达到 DP+EP 的 1.24 倍、TP 设计的 2.5 倍；不限制 TTFT 时 DP+EP 与 PP 最高请求率只差 8% 以内，但要等 99 分位 TTFT 超过 30 秒；同一请求率下 PP 的中位 TTFT 约是 DP+EP 的三分之一（每 GPU 每秒约 11 请求时 0.19 秒对 0.59 秒）。</p>
+<p><strong>成本</strong>：按 TraceLab 回放 400 会话的请求率，B200 按需价每小时 6.73 美元，预填充 1000 个请求约花 0.18 美元 GPU 时间；vLLM DP+EP 最高请求率时约 0.60 美元；Z.ai API 同样请求约 4.7 美元（每百万输入 token 0.15 美元、每百万缓存输入 token 0.03 美元；每请求约 143k 提示词 token，其中约 3.3k 是新的）。SSEngine GPU 成本约是 API 价格的 1/25；即使按 OpenRouter 最低输入价、缓存 token 按 Z.ai 的价算，账单也约是 SSEngine GPU 成本的 23 倍。账单大头是缓存前缀 token，因为每请求都要把整个前面上下文再发一遍。</p>
+<p><strong>剩余差距</strong>（1500 会话 8 小时仿真）：可回收损失合计占 GPU 时间的 51%：流水线气泡 5.5%，小于最快尺寸的微批次 12.6%，跑得比同精度单个大 GEMM 或拷贝慢的核 18.1%，多余工作 14.5%（大头是融合不够，每个核把中间结果写进 HBM、下一个核再读回来）。其余 49% 回收不了：模型必要工作 32%，功率限制下减速 6.1%，实测最快核仍低于规格峰值 11.2%。慢核损失大头在 KDA 分块注意力（6.8%）与路由专家 MoE（6.2%）；多余工作大头在 mHC 残差混合（4.1%）与大算子间的小核（3.4%）；小微批次代价在投影 GEMM（3.7%）与 MoE 核（3.6%）上最大。</p>
+<h2>启示</h2>
+<ul>
+<li>智能体 prefill 的胜负手在三处：并行布局（核不切分、通信不上关键路径）、前缀缓存（容量必须长出 HBM，KDA 这类线性注意力状态也要进缓存）、调度（最短剩余优先 + 反饿死上限）。</li>
+<li>PP 在智能体 prefill 上赢 TP，核心原因是核效率：TP 把 DSA indexer、mHC 这类不可切分的核在每块 GPU 上全量跑了一遍，还加了每层两次 all-reduce；PP 的代价只有一个：可均衡的气泡。</li>
+<li>缓存分层的关键是不对称：DRAM 独占（容量紧张）、SSD 包容（容量富余，省写）；KDA 状态的写放大（37 MB 对 4 MB）是 SSD 寿命的头号敌人，量化状态是直接解法。</li>
+<li>上手：SSEngine-GLM5.3-Flash 已开源，四块 B200 GPU 上服务 NVFP4 或 FP8 检查点，OpenAI 兼容 API，无 decode 路径、每请求只返回一个 token；ServingStudio 的 Analyzer 可以把任何仿真设计的 GPU 时间按原因拆开。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
