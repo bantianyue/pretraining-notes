@@ -848,6 +848,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">Agent for Infra</span><span class="tag">KV 缓存</span><span class="tag">vLLM</span><span>收藏于 2026-11-18</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">75</span>《FlyDSL MonoKernel》依赖算子合进一次持久化 launch，解码提速最高 2.26 倍</h3>
+  <p>小批量解码的大部分时间花在核与核之间：FlyDSL MonoKernel 把互相依赖的算子收进一次持久化 launch，用核内数据就绪交接省掉整核边界的等待。DeepSeek-V4.1-Flash 首个实现把 30 个标准层跑成 K1 + K2，并发为 1 时 P90 交互速度从 318.1 升到 429.1 token/秒/用户；vLLM 主线已合入 5 个模型，并发为 1 时交互速度最高提升 2.26 倍，精度变化在噪声范围内。</p>
+  <div class="links">
+    <a class="cn" href="pages/flydsl-monokernels.html">中文精读 →</a>
+    <a class="en" href="https://vllm.ai/blog/2026-11-18-flydsl-monokernels">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">GPU kernel</span><span class="tag">推理优化</span><span class="tag">持久化 launch</span><span class="tag">vLLM</span><span>收藏于 2026-11-19</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
