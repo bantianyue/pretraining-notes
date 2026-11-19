@@ -868,6 +868,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">GPU kernel</span><span class="tag">推理优化</span><span class="tag">MoE</span><span>收藏于 2026-11-19</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">77</span>《KV 缓存溢出 PCIe》32K 上下文回读只要 27 毫秒，重算却要 1.5 到 2.5 秒</h3>
+  <p>32K token 的 Llama 3.1 70B 用户带 10.7GB KV 缓存，8 卡 H100 的 HBM 只装 37 人；单个用户从 CPU 内存经 PCIe 回读只要 27 毫秒，比重算快 50 倍以上；但负载一上来 PCIe 就变成队列，500 毫秒预算内满速也只能接住约 18 个同时回来的用户；9 个生产坑与按负载分的 KV 归属表。</p>
+  <div class="links">
+    <a class="cn" href="pages/when-the-kv-cache-spills-over.html">中文精读 →</a>
+    <a class="en" href="https://pub.towardsai.net/when-the-kv-cache-spills-over-pcie-996781bd7658">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">PCIe</span><span class="tag">显存管理</span><span>收藏于 2026-11-19</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
