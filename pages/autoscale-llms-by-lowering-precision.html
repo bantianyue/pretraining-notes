@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 运行时降精度：BF16/FP8/INT4 热切换，128 并发吞吐高 29% · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM 运行时降精度：BF16/FP8/INT4 热切换，128 并发吞吐高 29%</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://medium.com/@czinege.roland/autoscale-llms-by-lowering-precision-in-vllm-179ef409fd6e">https://medium.com/@czinege.roland/autoscale-llms-by-lowering-precision-in-vllm-179ef409fd6e</a></div>
+<h1>vLLM 运行时降精度：BF16/FP8/INT4 热切换，128 并发吞吐高 29%</h1>
+<ul>
+<li>原文：<a href="https://medium.com/@czinege.roland/autoscale-llms-by-lowering-precision-in-vllm-179ef409fd6e">Autoscale LLMs by Lowering Precision in vLLM</a>（Medium，2026-11-18 发表）</li>
+<li>作者：Roland Czinege</li>
+<li>主题：低精度量化、推理优化、vLLM、自动扩缩容、CUDA 图、KEDA</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：一个 vLLM 插件让运行中的模型不停机切换 BF16、FP8 与 INT4：各精度副本放系统内存、只把当前权重放显存，每种精度各录一套 CUDA 图；实测单块 RTX 4090、Qwen3-4B 上 FP8 各负载快 15% 到 32%，INT4 W4A8 在 128 并发时 3,715 token/秒，比 BF16 高 29%。</li>
+</ul>
+<h2>核心结论</h2>
+<p>GPU 算力越来越贵，租卡市场也不稳定，同一块卡能多服务几个用户就成了省钱的关键。vLLM 启动时定死的精度改不了，重启换精度要几分钟，跟不上负载变化。一个插件给运行中的 vLLM 加了这个能力：对外暴露一个简单 API，外部控制器可以在推理服务器继续服务请求的同时，在同一模型的 BF16、FP8 与 INT4 版本之间切换。思路是峰值负载下，稍微不准一点的答案总比慢答案或没答案强。</p>
+<h2>三次尝试：从两份权重放显存，到每种精度一套 CUDA 图</h2>
+<p><strong>第一次：BF16 与 FP8 同时放显存。</strong>vLLM 加载完 BF16 模型，插件当场量化，把每个线性层的权重转成 FP8，两份都留在 GPU 上，启动时多花几秒。运行时每层的输入也当场转成 FP8，矩阵乘法按 FP8 精度跑；RTX 4090 的 Tensor Core 每秒能做的 FP8 运算约是 BF16 的两倍。每一步每层直接选要用哪份权重。切换很顺，但 FP8 权重占了约 4GB 显存，KV 缓存少 30%（88.6k token 降到 62k），64 并发以内 FP8 每秒多给 16% 到 28% 的 token，128 并发时收益没了，p95 首 token 时间从 2.4 秒升到 7.3 秒。</p>
+<p><strong>第二次：只把当前权重放显存。</strong>插件启动时把每个精度的副本都放系统内存里，总共约 11GB，只有当前用的那份留在 GPU 上；切换触发时新权重在后台拷进显存，vLLM 继续服务请求，一次切换约 1 秒，KV 缓存回到几乎和原来一样大（87.9k token 对 88.6k）。但这个方案低负载下甚至比原版还慢，问题出在 CUDA 图上：图是按 BF16 权重录的，永远在那块内存上跑 BF16 核，切到 FP8 后同一块内存里是 FP8 权重，BF16 核读不了。只好关掉 CUDA 图，低负载下只达到 BF16 原版约一半的速度（单用户 52 token/秒对 101 token/秒；原版关图本身在单用户时就低 31%）。</p>
+<p><strong>第三次：每种精度一套 CUDA 图。</strong>关键是看清 CUDA 图里到底存了什么：图不存权重，只存哪个核在哪个显存地址上跑；而这个版本里权重从不挪地方，每层永远用显存里同一个位置，变的只是里面的内容。插件让 vLLM 启动时把每张图录两遍，一遍用 BF16 核，一遍用 FP8 核，运行时按内存里当前权重重放对应的那套图。切换时权重一层一层拷，约 1 秒里有的层已是 FP8、有的还是 BF16，两套图都不合这种混合状态，那几步不用图跑；等每层都切完，插件换到另一套图，图又回来了。第二套 CUDA 图占约 0.2GB 显存，启动稍长一点。两套图之后速度回来了：切到 FP8，各负载下都比 BF16 原版 vLLM 每秒多给 15% 到 32% 的 token，128 并发时 p95 首 token 时间反而更低，1.7 秒对 2.3 秒。</p>
+<h2>第三种精度：INT4</h2>
+<p>换权重的版本跑通后，加第三种精度很容易：每个版本反正都放系统内存里，INT4 只多占约 1.7GB 内存，显存一分不加。与 FP8 一样，INT4 权重在启动时从 BF16 权重算出来：每组 128 个权重取整到 4 位。这种格式叫 W4A16，意思是权重按 4 位存，激活（层与层之间流动的值）保持 16 位；权重缩到 BF16 的约四分之一，但数学还是按 BF16 跑，核在计算时当场把 4 位权重解开。约 64 用户起 INT4 不再变快，因为它的 BF16 数学成了瓶颈，FP8 追了上来。</p>
+<p>W4A8 版本用同样的 4 位权重，但每层的输入当场转成 FP8，数学跑在 FP8 Tensor Core 上。低负载下它比普通 INT4 稍慢（单用户 203 token/秒对 222 token/秒），因为转输入多了一小步，而单用户时真正的瓶颈是读权重，不是数学。32 并发以上，它是所有版本里最快的：128 并发时每秒服务 3,715 token，比 FP8 高 12%、比 BF16 高 29%，p95 首 token 时间最低，1.8 秒。</p>
+<h2>降精度要付出什么代价</h2>
+<p>代价主要是答案质量。用 lm-evaluation-harness 在四个版本上跑了 9 项标准测试，同一块 RTX 4090、同一个 Qwen3-4B 模型：FP8 几乎免费，最多丢 1.2 分，平均保留 BF16 分数的 99.3%；INT4 多数测试掉 2 到 4 分，平均保留约 94%，两个 INT4 版本很接近（W4A16 为 94.5%，W4A8 为 94.2%），8 位数学几乎没多丢分；代码掉得最狠，HumanEval+ 上解出的题目占比从 64% 掉到 53%（W4A16）。这些数字只对这个模型和这些测试成立，换个模型损失可能很不一样，很大程度上看用例：聊天机器人可能几乎注意不到 INT4，拿模型做 Agent 编码的开发者会立刻察觉。选放哪几档精度之前，先在自己的负载上测。</p>
+<h2>概念验证：KEDA 与精度自动扩缩</h2>
+<p>目标是负载在 16 到 56 并发用户之间波动、模拟流量突发与回落时，每用户保住 60 token/秒。原计划 4 块 RTX 4090 的 Kubernetes 集群，但 RunPod 上四块 4090 同时空闲的时间窗口很难找，最后用了 2 块 4090 的集群。架构是 k3d 里的负载生成器、Service、两个 vLLM Pod（StatefulSet，每 GPU 机器一个）、Prometheus 每 2 秒抓指标、KEDA 按用户数除以 32 算副本数、Grafana；每块 GPU 机器上 agent 启停 vLLM，vLLM 加精度插件，精度控制器在 BF16、FP8、INT4 之间切换。</p>
+<p>负载升到 56 并发用户时，KEDA 启动第二块 4090 的 Pod，冷启动时间相当长（加载权重、捕获 CUDA 图等等），56 个用户的请求全落在已经跑着的那个 Pod 上。只靠 KEDA 保不住目标，每用户速度掉到约 50 token/秒，直到第二个 Pod 就绪。自动扩缩版本看到流量跳升，把跑着的 Pod 切到 INT4 W4A8；第二块 4090 的 Pod 开始服务用户请求，负载分到两个 Pod，插件再逐级升回去，先 FP8，再回到默认的 BF16 精度。流量回落到 16 用户后速度在每用户 80 多 token/秒；约 8 分钟时 KEDA 关掉第二个 Pod，BF16 精度下每用户仍保住约 78 token/秒。模拟再重复一次突发与回落，趋势相似。整个测试跑了两遍，结果几乎一样。</p>
+<h2>启示</h2>
+<p>这篇的通用教训是：精度自动扩缩不是自动扩缩的替代品，而是补上自动扩缩追上来的那段空档。KEDA 照样加 Pod，但新 Pod 启动期间，跑着的 Pod 先降精度，让每个用户都保住目标；突发过去，集群直接回到全 BF16 质量。实现上的两个关键点：权重换内容不换地址，每种精度各录一套 CUDA 图，切换时只换重放的图集；各精度副本放系统内存，只把当前权重放显存，切换约 1 秒，KV 缓存基本不受影响。代价是精度：FP8 几乎免费，INT4 平均约 94%，代码测试掉得最多；能不能用、用到哪档，先在自己的负载上测过再定。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
