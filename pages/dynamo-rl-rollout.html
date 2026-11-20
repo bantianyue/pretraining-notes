@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA Dynamo：KV 感知路由与增量权重分发，强化学习 rollout 瓶颈的解法 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>NVIDIA Dynamo：KV 感知路由与增量权重分发，强化学习 rollout 瓶颈的解法</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developer.nvidia.com/blog/reducing-rollout-bottlenecks-in-reinforcement-learning-with-nvidia-dynamo/">https://developer.nvidia.com/blog/reducing-rollout-bottlenecks-in-reinforcement-learning-with-nvidia-dynamo/</a></div>
+<h1>NVIDIA Dynamo：KV 感知路由与增量权重分发，强化学习 rollout 瓶颈的解法</h1>
+<p><strong>原文</strong>：https://developer.nvidia.com/blog/reducing-rollout-bottlenecks-in-reinforcement-learning-with-nvidia-dynamo/（NVIDIA Technical Blog，2026-11）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-20 | <strong>主题</strong>：并行策略（推理）</p>
+<h2>一句话要点</h2>
+<p>强化学习训练规模一大，四件事开始浪费 GPU 算力、拖慢训练：重复的计算工作、缓慢的 rollout、权重更新、工作节点故障。NVIDIA Dynamo 是补上这块的服务层：KV 感知路由在缓存复用与工作节点负载之间折中，ModelExpress 复用集群里已有的权重、只传压缩后的变化量，恢复机制把故障的影响限制在中断的那一轮。CoreWeave 用它把模型权重更新加速到 15 倍，H Company 把平均训练步时间缩短 20%、GPU 小时减少 5%。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>三个约束</strong>：Rollout 完成时间、重复的上下文、权重时效。最慢的必需 rollout 拖住下一步，相同的 prompt 前缀被反复重算，新权重必须按算法要求及时送达。</li>
+<li><strong>KV 感知路由</strong>：把共享 prompt 的请求发给已缓存该 prompt 的工作节点，省掉重复处理；同时看负载，不让所有请求排进同一个队列。</li>
+<li><strong>ModelExpress</strong>：兼容的工作节点经 NIXL 直接从另一块 GPU 复制权重，不走远端存储；每次更新只传压缩后的变化量，替换节点用检查点加增量赶上进度。</li>
+<li><strong>恢复</strong>：检测到工作节点丢失后把新请求导向合格节点，符合条件的进行中请求迁移，保存的历史让会话从中断处续上，不从头重启。</li>
+</ul>
+<h2>为什么需要分布式 rollout 基础设施</h2>
+<p>一次推理 rollout 可能只有一条回答；编码智能体的 rollout 可能涉及仓库探索、编辑、工具调用与测试，工作量在推理工作节点之间分布不均。三个约束决定这份工作量能多有效地支撑训练：</p>
+<ul>
+<li><strong>Rollout 完成时间</strong>：训练需要一组样本时，最慢的那个必需 rollout 会拖住下一步；把请求数平均分到各 GPU 上，不等于把工作量平均分了。</li>
+<li><strong>重复的上下文</strong>：多次尝试常常从相同的指令、任务描述或代码仓库上下文开始；把这些前缀重算一遍，GPU 算力在产生新输出之前就被消耗掉。</li>
+<li><strong>权重时效</strong>：训练全程不断产出新权重，工作节点必须按算法对采样与可接受过期程度的要求及时拿到它们。</li>
+</ul>
+<h2>架构：生成与权重管理走不同路径</h2>
+<p>Dynamo 坐在 rollout 编排与推理工作节点之间。强化学习框架提交生成请求，Dynamo 把请求路由到合格的容量上，推理引擎执行模型。</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>强化学习框架</td>
+<td>优化、奖励、环境、检查点与样本接受</td>
+</tr>
+<tr>
+<td>Dynamo</td>
+<td>路由、工作节点管理、服务控制与遥测</td>
+</tr>
+<tr>
+<td>推理引擎</td>
+<td>生成与应用更新后的权重</td>
+</tr>
+<tr>
+<td>ModelExpress</td>
+<td>经支持的集成做模型权重与制品分发</td>
+</tr>
+</tbody>
+</table>
+<p>请求走共享的服务前端，刷新操作在框架控制下定向到选定的工作节点。框架决定工作节点什么时候可以生成样本、哪些结果有资格进训练。路由决定生成在哪里跑；框架决定产出的样本是否满足训练要求。</p>
+<h2>KV 感知路由：缓存复用与负载的折中</h2>
+<p>强化学习常常对同一任务用共享的 prompt 生成多个解法。把这些请求发给已经缓存了该 prompt 的工作节点，可以省掉重复处理，节约 GPU 算力。但把所有请求都发给同一个工作节点会排起队，拖慢 rollout 与下一步训练。Dynamo 的路由器在 KV 缓存复用与工作节点负载之间平衡，目标是让训练需要的样本更早完成。</p>
+<h2>ModelExpress：权重分发不再走远端存储</h2>
+<p>强化学习训练反复更新模型，每次把完整检查点发给全部 rollout 工作节点既花时间，也可能打断生成。ModelExpress 复用集群里已有的权重：兼容的工作节点可以直接经 NIXL 从另一块 GPU 复制权重，比从存储加载更早可用。增量权重传输进一步减少每次更新要发的数据：不搬整个模型，只发变化量的压缩表示，工作节点从匹配的基础版本重建新权重。这对恢复也有帮助：替换的工作节点可以加载一个检查点、再应用后续的增量，赶上训练进度；健康的工作节点可以在容量恢复期间继续生成 rollout。强化学习框架协调工作节点什么时候应用更新、处理缓存状态，并在接受新样本前检查就绪情况。</p>
+<h2>恢复：故障只影响中断的那一轮</h2>
+<p>长时间的训练必须容纳工作节点故障，不能无谓地打断健康的容量。Dynamo 检测到工作节点丢失后，把新请求导向合格的工作节点；替换的工作节点就绪后加入路由，rollout 生成在有节点故障时继续进行。支持的配置还能让符合条件的进行中请求迁移，并优雅地排空故障节点。强化学习框架处理被打断的样本，并保证替换节点用上要求的权重。</p>
+<h2>落地</h2>
+<ul>
+<li>微软 AI 用 NVIDIA Dynamo 支持后训练期间的强化学习 rollout 推理。</li>
+<li>CoreWeave 用 Dynamo 与 ModelExpress 把模型权重更新加速到 15 倍。</li>
+<li>Cognition 用 Dynamo 管理推理工作节点、在 SWE-1.7 后训练期间路由 rollout。</li>
+<li>Prime Intellect 用 Dynamo 做分布式推理编排。</li>
+<li>H Company 用 Dynamo 与 ModelExpress 把平均训练步时间缩短 20%、GPU 小时减少 5%。</li>
+<li>开源集成把 Dynamo 接进已有的强化学习栈，包括 verl、NeMo RL、Slime 与 prime-rl。</li>
+</ul>
+<h2>公众号文章</h2>
+<p>NVIDIA Dynamo：KV 感知路由与增量权重分发，强化学习 rollout 瓶颈的解法（草稿，2026-11-20 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GFWwt5EtUtzqVtWHb0xpnRaxaiZ1XaPexiR5aXviVdML</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
