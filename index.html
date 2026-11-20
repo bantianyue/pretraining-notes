@@ -958,6 +958,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">强化学习</span><span class="tag">TPU</span><span class="tag">训练推理一致性</span><span>收藏于 2026-11-20</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">86</span>《NVIDIA Dynamo：KV 感知路由与增量权重分发，强化学习 rollout 瓶颈的解法》权重更新加速 15 倍，训练步时间缩短 20%</h3>
+  <p>强化学习训练规模一大，四件事开始浪费 GPU 算力：重复的计算、缓慢的 rollout、权重更新、工作节点故障。Dynamo 是补上这块的服务层：KV 感知路由在缓存复用与负载之间折中，ModelExpress 经 NIXL 从另一块 GPU 复制权重、每次更新只传压缩变化量，恢复机制把故障的影响限制在中断的那一轮。CoreWeave 用它把权重更新加速到 15 倍，H Company 把平均训练步时间缩短 20%、GPU 小时减少 5%。</p>
+  <div class="links">
+    <a class="cn" href="pages/dynamo-rl-rollout.html">中文精读 →</a>
+    <a class="en" href="https://developer.nvidia.com/blog/reducing-rollout-bottlenecks-in-reinforcement-learning-with-nvidia-dynamo/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">强化学习</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span>收藏于 2026-11-20</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
