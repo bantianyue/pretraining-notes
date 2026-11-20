@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NarrowSpec：草稿隐藏宽度不必等于目标模型 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>NarrowSpec：草稿隐藏宽度不必等于目标模型</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2611.23835">https://arxiv.org/abs/2611.23835</a></div>
+<h1>NarrowSpec：草稿隐藏宽度不必等于目标模型</h1>
+<p><strong>原文</strong>：https://arxiv.org/abs/2611.23835（NVIDIA，Alagappan Valliappan 等）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-20 | <strong>主题</strong>：并行策略（推理）</p>
+<h2>一句话要点</h2>
+<p>投机解码的草稿模型不必继承目标模型的隐藏宽度：整条残差流缩到一半甚至四分之一，接受长度基本保住；DFlash 借用的词表投影与输出适配器在加载时折叠成一个窄投影，logits 只差浮点舍入；B200 上端到端快 1.06 至 1.12 倍，GB10 上快 1.13 至 1.44 倍。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>宽度不必匹配</strong>：880 提示面板上，半宽接受长度最多花 3.0%，四组组合里两组不降反升（DFlash-Qwen +0.84%，EAGLE-3-GPT-OSS +2.11%）；四分之一宽花 2.1% 至 5.4%。</li>
+<li><strong>端到端提速</strong>：批量 1、温度 0，B200 上半宽 1.06 至 1.09 倍、四分之一宽 1.06 至 1.12 倍；GB10 上半宽 1.13 至 1.23 倍、四分之一宽 1.20 至 1.44 倍，四组里四分之一宽全是最快。</li>
+<li><strong>收益随批量保持</strong>：B200 上批量 1 到 512，半宽最快 1.16 倍、四分之一宽最快 1.21 倍；从批量 32 到各卡能装的最大批量，两块卡上最快都到 1.21 倍，没有任何窄草稿比全宽慢。</li>
+<li><strong>上下文影响小</strong>：8k 到 32k，没有任何一组每轮提速变化超过 1.6%。</li>
+</ul>
+<h2>方法：缩窄整条残差流</h2>
+<p>记目标宽度 dₜ、草稿宽度 d_d。特征条件草稿模型在两端与目标模型相接：输入是目标模型里抽出的 dₜ 宽隐藏状态，输出是 V 个 token 上的分布。中间各层流过的残差流不必是 dₜ 宽，NarrowSpec 把它设为 dₜ/2 或 dₜ/4。残差流被每个模块共享，缩窄它等于同时缩窄草稿里每个读写它的投影：每层注意力投影与 MLP、接入目标特征的拼接投影 fc、写草稿 KV 缓存的投影、通向词表的投影。头数、头维度和 MLP 中间维度不随宽度变，KV 缓存大小因此不变。</p>
+<p>两种草稿模型覆盖了 drafting 的两种形态与词表投影的两种来源：</p>
+<ul>
+<li><strong>DFlash（块并行）</strong>：每轮一次前向处理 k 个位置（奖励 token 加 k-1 个掩码 token），提议 k-1 个 token；k 在 Qwen3-8B 上是 16，GPT-OSS-20B 上是 8；5 层或 8 层堆叠；从目标模型 5 层抽隐藏状态，借用目标模型的词嵌入与词表投影。</li>
+<li><strong>EAGLE-3（自回归）</strong>：单解码层每轮跑 7 步，每步提议 1 个 token；第一步读刚接受的 token 与三层抽出的目标隐藏状态（拼成 3dₜ），后 6 步只读草稿自己的上一个 token 与隐藏状态；借用目标词嵌入，自己训练词表投影，词表剪枝到 32,000 / 64,000 项。</li>
+</ul>
+<p>窄草稿从自己的宽度从头训练，在与目标宽度张量相接的每个位置放适配器：拼接投影 fc 把 5dₜ 或 3dₜ 压到 d_d，token 词嵌入过 dₜ→d_d 输入适配器。</p>
+<h2>词表投影折叠</h2>
+<p>DFlash 用目标模型的词表投影 W_lm（V×dₜ）打分，训练时加输出适配器 W_out（dₜ×d_d）把窄状态映射回目标宽度。推理时如果照训练的样子跑，每轮要先跑输出适配器、再跑全宽词表投影。窄草稿把最终归一化放在 d_d 宽度、W_out 之前，两个映射之间没有任何非线性，于是加载时合成一次 W_fold = W_lm W_out（V×d_d），服务时一次 GEMM 直接从草稿宽度打到词表，输出适配器永不运行。合成在代数上精确，浮点上只差舍入顺序；在训练好的半宽 Qwen3-8B 适配器与真实草稿状态上，折叠后的 logits 与 FP64 参考的距离反而比未折叠略近。</p>
+<p>折叠出的窄投影常驻显存，但每步读的字节大幅减少：Qwen3-8B 上词表投影 GEMM 与 argmax 核合计从 218.5 微秒降到四分之一宽的 65.4 微秒。EAGLE-3 在导出时把输入适配器乘进目标词表，得到自己的 V×d_d 词表，服务时不跑适配器 GEMM。</p>
+<h2>延迟归因：draft 在缩，verify 不动</h2>
+<p>B200、批量 1、生产配置下，半宽的 draft 快 1.25 至 1.46 倍，四分之一宽快 1.43 至 1.75 倍，verify 在每组里变化都在 1% 以内。draft 内部，解码层与词表投影都随宽度缩窄；四组里有三组，解码层贡献的绝对节省更多。</p>
+<p>节省分散在整个 draft 里：四组里有三组，MLP 投影占 draft 主体节省的 36% 至 49%，注意力投影占 10% 至 18%，词表投影占 30% 至 44%。只砍 MLP 或只砍词表投影代替不了整条残差流缩窄：DFlash-Qwen 上两者分别省 206 与 271 微秒，四分之一宽省 390 微秒；只砍 MLP 的消融草稿要追上窄草稿，接受长度得再高 2.1% 至 10.6%（追半宽）。</p>
+<h2>为什么不同 GPU 收益不同</h2>
+<p>同样的草稿在 B200 上提速 1.06 至 1.12 倍、GB10 上 1.13 至 1.44 倍，H100 上 DFlash-Qwen 两种宽度都快 1.11 倍。verify 在三块卡上都不随宽度动，收益只来自 draft，大小由两件事定：draft 占每轮的份额，以及窄 draft 比全宽快多少。草稿权重随宽度成比例缩小，时间如果跟着字节走，半宽该快 2 倍、四分之一宽快 4 倍；实际能到多接近，取决于缩小的 GEMM 还能保持多少峰值带宽。</p>
+<p>最大的词表投影（1,245 MB）在 B200 上保持 73% 至 78% 的峰值带宽、GB10 上 84% 至 85%；较小的投影随缩小丢带宽：B200 上从全宽到四分之一宽，FC1 从 70% 掉到 56%，FC2 从 69% 掉到 33%，QKV 从 60% 掉到 30%，输出投影从 48% 掉到 19%。GB10 上同样的核在四分之一宽跑 46 至 226 微秒，全程保持 79% 至 84% 的峰值带宽。五个 GEMM 合计，B200 从全宽的 69% 峰值带宽掉到四分之一宽的 47%，GB10 从 83% 只掉到 81%。四分之一宽的 draft 在 GB10 上快 3.44 至 3.87 倍，B200 上只快 1.43 至 1.75 倍；H100 上快 2.37 倍，介于两者之间。</p>
+<h2>选宽度的经验法则</h2>
+<ul>
+<li>数据中心卡如 B200，半宽是值得先试的默认值：面板上端到端 1.06 至 1.09 倍，四组里两组不花接受长度、另两组花 1.5% 与 3.0%。</li>
+<li>低带宽卡如 GB10，四分之一宽在每组都是最快，1.20 至 1.44 倍。</li>
+<li>确认词表投影跟着主体一起缩窄，借来的头要折叠；在新宽度上重调学习率与初始化，而不是沿用全宽草稿的设置。</li>
+<li>量化与缩窄可叠加，但收益随草稿变窄而缩小：DFlash-Qwen 批量 1 上，NVFP4 量化全宽草稿快 1.07 倍，半宽 BF16 草稿快 1.09 倍且不花接受长度，两者在半宽叠加最快（1.11 倍）；四分之一宽上量化相对 BF16 是 0.99 倍。</li>
+</ul>
+<h2>局限</h2>
+<p>每个变体是单次训练、单一随机种子、匹配数据预算而非收敛；只测了两类草稿模型与两个目标模型；上下文扫描只到 32k，缩窄不缩小 KV 注意力，更长上下文上收益会缩小。</p>
+<h2>公众号文章</h2>
+<p>公众号文章：NVIDIA NarrowSpec：草稿隐藏宽度不必等于目标模型，解码端到端提速1.06至1.44倍（草稿，2026-11-20 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GJG0F80lxSVTPIYQdwgRu77GAMACSKlsyuiUrzk_1FhD</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
