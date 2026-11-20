@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Google 流式 DiLoCo：按层切 65 片逐片同步，跨城低带宽训练 9.57 倍加速 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Google 流式 DiLoCo：按层切 65 片逐片同步，跨城低带宽训练 9.57 倍加速</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developers.googleblog.com/distributed-llm-training-across-metros-streaming-diloco-in-maxtext/">https://developers.googleblog.com/distributed-llm-training-across-metros-streaming-diloco-in-maxtext/</a></div>
+<h1>Google 流式 DiLoCo：按层切 65 片逐片同步，跨城低带宽训练 9.57 倍加速</h1>
+<p><strong>原文</strong>：https://developers.googleblog.com/distributed-llm-training-across-metros-streaming-diloco-in-maxtext/（Google Developers Blog）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-20 | <strong>主题</strong>：并行策略（训练）</p>
+<h2>一句话要点</h2>
+<p>传统上训练最前沿大语言模型依赖一台单体加速器集群；跨数据中心跑标准数据并行训练时，慢速广域网传输盖不住计算，训练被网络拖住。Google 的流式 DiLoCo 把模型参数切成 P 个互不重叠的片段，在 H 步里每个片段恰好同步一次，与香草 DiLoCo 的外循环节拍完全相同，但不再每 H 步停下来搬整个模型。Qwen3-32B 在 2 块 TPU v5p-32 slice 上的实测：10 Gbit/s 链路上数据并行退化到 55.11 秒每步，流式 DiLoCo 保持 5.76 秒每步，加速 9.57 倍；65 步跨 slice 通信量从 4,258.8 GB 降到 67.0 GB，少 65 倍；两组 MoE 预训练的验证损失还略好于同步基线。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>内外双循环</strong>：每个 learner 在本地用 AdamW 跑 H 步，每 H 步跨组平均权重 delta、再用带 Nesterov 动量的 SGD 更新全局权重；通信频率比标准同步训练低 H 倍。</li>
+<li><strong>流式同步</strong>：把模型切成 P = N_LAYERS + 1 个片段，每 Δh 步同步一个片段，H 步里每个片段恰好同步一次，通信量摊成一条均匀细流，不再有整模型突发。</li>
+<li><strong>实测</strong>：Qwen3-32B、2 块 TPU v5p-32：10 Gbit/s 时数据并行 55.11 秒每步，流式 DiLoCo 5.76 秒每步、加速 9.57 倍；通信量 65 步少 65 倍。</li>
+<li><strong>收敛</strong>：两组 MoE 预训练 4,000 步，流式 DiLoCo 的验证损失比同步基线还低 0.020 与 0.021。</li>
+</ul>
+<h2>三种范式要多少带宽</h2>
+<p>模型有 |Θ| 个参数，每个参数 b 字节（bfloat16 时 b = 2），每步计算时间 t_step = t_fwd + t_bwd。标准数据并行每次同步经 all-reduce 传 2|Θ|b 字节；把梯度的 reduce-scatter 与反向传播重叠，峰值带宽需求是 B_DP ≈ 2|Θ|b / t_bwd。</p>
+<table>
+<thead>
+<tr>
+<th>范式</th>
+<th>同步节拍</th>
+<th>每次同步传输字节</th>
+<th>避免停顿所需的峰值带宽</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据并行（DP）</td>
+<td>每步（1）</td>
+<td>2|Θ|b</td>
+<td>B_DP ≈ 2|Θ|b / t_bwd</td>
+</tr>
+<tr>
+<td>香草 DiLoCo</td>
+<td>每 H 步</td>
+<td>2|Θ|b（整模型突发）</td>
+<td>B_香草 ≈ 2|Θ|b / t_bwd</td>
+</tr>
+<tr>
+<td>流式 DiLoCo</td>
+<td>每 Δh 步（H/P 步）</td>
+<td>2|Θ|b / P（1 个片段）</td>
+<td>B_流式 = 2|Θ|b / (H × t_step)（H ≥ P 时）</td>
+</tr>
+</tbody>
+</table>
+<p>算例（Qwen3-32B，bfloat16，t_step 约 6.2 秒，P = H = 65）：数据并行每步交换约 65.5 GB 梯度，至少需要约 85 Gbps 的持续跨 slice 带宽；在 10 Gbps 链路上要 50 秒以上。香草 DiLoCo 总流量降 65 倍，但每第 65 步仍要一次性传完整约 65.5 GB 而停顿。流式 DiLoCo 每步只交换约 1.0 GB，只需约 1.3 Gbps 带宽。</p>
+<h2>实测：性能与网络韧性</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>不限速</th>
+<th>30 Gbit/s 聚合（中度）</th>
+<th>10 Gbit/s 聚合（重度）</th>
+<th>相对数据并行的加速（30 / 10 Gbit/s）</th>
+<th>跨 slice 通信量（每 65 步）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>流式 DiLoCo（P = 65，H = 65）</td>
+<td>5.76 秒/步</td>
+<td>5.76 秒/步</td>
+<td>5.76 秒/步</td>
+<td>3.37× / 9.57×</td>
+<td>67.0 GB（少 65 倍）</td>
+</tr>
+<tr>
+<td>香草 DiLoCo（H = 65）</td>
+<td>5.87 秒/步</td>
+<td>6.39 秒/步</td>
+<td>7.55 秒/步</td>
+<td>3.04× / 7.30×</td>
+<td>141 GB（少 30 倍）</td>
+</tr>
+<tr>
+<td>数据并行基线</td>
+<td>5.58 秒/步</td>
+<td>19.41 秒/步</td>
+<td>55.11 秒/步</td>
+<td>1.00×</td>
+<td>4,258.8 GB（1 倍）</td>
+</tr>
+</tbody>
+</table>
+<p>30 Gbit/s 时数据并行已把链路打满、退化到 19.41 秒每步，流式 DiLoCo 保持 5.76 秒每步；10 Gbit/s 时数据并行 55.11 秒每步，香草 DiLoCo 7.55 秒每步（仍有每 65 步一次的整模型同步气泡），流式 DiLoCo 保持 5.76 秒每步，消掉了第 H 步的停顿。P = N_layers + 1 时，模型加深会增加各层的每步计算时间，而流式 DiLoCo 的每步通信仍除以 P，留出更多计算时间摊销后台权重传输；稠密 Qwen3-32B 上损失与同步基线相当，模型质量无退化。</p>
+<h2>收敛与模型质量</h2>
+<table>
+<thead>
+<tr>
+<th>模型架构</th>
+<th>流式 DiLoCo 损失</th>
+<th>数据并行基线</th>
+<th>差值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Qwen3-30B-A3B（MoE）</td>
+<td>2.287</td>
+<td>2.307</td>
+<td>-0.020（更好）</td>
+</tr>
+<tr>
+<td>Gemma4-26B-A4B（MoE）</td>
+<td>2.298</td>
+<td>2.319</td>
+<td>-0.021（更好）</td>
+</tr>
+</tbody>
+</table>
+<p>两点让收敛不退化：外层 Nesterov 动量（β = 0.9，外层学习率 η_outer 在 0.3–0.7 之间）沿片段伪梯度走，稳住全局轨迹；热内层优化器——同步只更新模型参数，各 learner 本地的 AdamW 一阶与二阶矩缓冲原封不动，片段同步后 learner 不丢优化器动量。</p>
+<h2>上手</h2>
+<p>MaxText 提供香草与流式 DiLoCo 的原生 JAX 与 Flax NNX 实现，不需要外部中心参数服务器。配置里设置 <code>enable_diloco: true</code> 与 <code>enable_streaming_diloco: true</code>，<code>num_diloco_fragments</code>（P）与 <code>diloco_sync_period</code>（H）都设为 N_layers + 1，每步恰好同步一个片段（Δh = 1）。底层：diloco.py 把全局 batch 分给 M 个 learner；待同步片段的权重 delta 被卸载到 learner 宿主机 CPU 上 M 路分片的同步 worker，在后台经网络执行分布式 all-reduce 平均片段 delta，TPU 继续跑内循环训练步；每个同步分片再本地应用外层 Nesterov 动量更新，把更新后的片段权重写回同机 TPU learner。流式 DiLoCo 已在 MaxText v0.2.5 上线。</p>
+<h2>公众号文章</h2>
+<p>Google 流式 DiLoCo：按层切 65 片逐片同步，跨城低带宽训练 9.57 倍加速（草稿，2026-11-20 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GOurFvSD7n1I0zLsuRBW4HaQsFz9knaACRLVCeOlv7pe</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
