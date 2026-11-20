@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zero-TIM：TPU 强化学习采样与训练的 logprob 逐位对齐 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Zero-TIM：TPU 强化学习采样与训练的 logprob 逐位对齐</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://developers.googleblog.com/unlocking-stable-on-policy-rl-on-tpu-with-bitwise-zero-traininference-mismatch/">https://developers.googleblog.com/unlocking-stable-on-policy-rl-on-tpu-with-bitwise-zero-traininference-mismatch/</a></div>
+<h1>Zero-TIM：TPU 强化学习采样与训练的 logprob 逐位对齐</h1>
+<p><strong>原文</strong>：https://developers.googleblog.com/unlocking-stable-on-policy-rl-on-tpu-with-bitwise-zero-traininference-mismatch/（Google Developers Blog，2026-11-16）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-20 | <strong>主题</strong>：并行策略（推理）</p>
+<h2>一句话要点</h2>
+<p>大模型强化学习里，采样器与训练器在同一套权重下给同一个动作算出不同的 logprob，根因是浮点算术：规约顺序与中间精度在两条执行路径上没有对齐。Zero-TIM 用四步把算术锁死，在 64 块 TPU v5p 上让采样器解码、服务预填充、训练器前向三条路径的动作 logprob 逐位相同；FrozenLake 验证里 logprob 差异在每个记录步上都是零，解题率 88.2%。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>问题</strong>：生产级强化学习栈里，采样与训练走两条各自特化的执行路径。训练排程是 on-policy 的，数值执行却引入了一个隐藏的 off-policy 缺口，并在多轮轨迹上越积越大。</li>
+<li><strong>契约</strong>：采样器解码、服务预填充、训练器前向三条路径，对每个采样动作都产出逐位相同的 logprob——比较原始浮点字节，零舍入、零容差。</li>
+<li><strong>结果</strong>：FrozenLake（2×2 到 9×9 网格、最多 5 轮交互）200 步验证，Zero-TIM 在每个记录步上的采样器-训练器 logprob 平均绝对差都是零，解题率 88.2%，高于 TIS 的 66.9% 与标准组的 62.7%。</li>
+</ul>
+<h2>根因：浮点加法不满足结合律</h2>
+<p>一次规约就是一棵浮点加法树。浮点加法不满足结合律，换一棵树，舍入落点就变了。bfloat16 的例子：相邻的两个 bfloat16 值是 2.0（0x4000）与 2.015625（0x4001），2.0 加上两个 0.0078125 时，先加 2.0 会把每个小输入逐个舍掉、结果仍是 2.0；先把两个小值加成 0.015625 再加，结果进到下一个可表示值 2.015625。同样的事发生在模型规约里：矩阵乘法累加部分和，归一化算统计量，张量并行分片合并部分输出。</p>
+<p>原来的栈里，采样器解码与训练器前向用了不同的 token 数组形状与前向实现。JAX 会按输入形状特化计算，训练前向还跑在一个可微分程序里。各条路径上的规约顺序与中间精度没有对齐，浮点舍入把这些算术差异变成了 logprob 里不同的位。权重与模型方程完全相同，算术不同。</p>
+<h2>对齐契约：为什么是三条路径</h2>
+<p>采样器与训练器直接对不上，只能证明数值缺口存在，说不清它从哪进来。把服务预填充放进中间当检查点，对齐变成两步诊断：采样器解码对预填充，验证服务引擎在增量生成 token 与整序列重打分之间自己与自己一致；预填充对训练器，验证服务引擎与训练引擎跨过编译与可微分边界后一致。两项检查都通过，策略更新才能进行。</p>
+<h2>四步配方</h2>
+<ol>
+<li><strong>锁死片内算术</strong>：每个张量并行 rank 内，批量不变 Pallas 核控制累加顺序与中间精度。投影核按固定收缩块顺序遍历，规约分块与 token 行数无关；部分积在 float32 里累加，输出时显式转换；下一个 tile 从 float32 累加器继续。覆盖注意力与 MLP 投影和 LM head；专用核固定 RMSNorm 规约与 SwiGLU 的中间转换。</li>
+<li><strong>排定跨片规约顺序</strong>：行并行投影里，每个 rank 产出一个部分输出。通信与加法分开：ppermute 先搬运部分结果，再由每个 rank 按相同的源 rank 顺序相加。规约顺序写在程序里是显式的。</li>
+<li><strong>共享动作 logprob 路径</strong>：解码、预填充、训练器用相同的采样变换、同一套固定的 Pallas log-softmax 构造，选同一个记录下来的动作 token；预填充与训练器给 rollout 里生成的动作打分；采样 token ID 在环境轮次之间保留下来（TiTO）。</li>
+<li><strong>给服务前向加自定义微分</strong>：训练器复用服务预填充的计算。自定义 VJP 让前向评估保留服务核，只提供反向规则；可微分副本只用来构造 pullback。编译进程经 XLA_FLAGS 传入 <code>--xla_allow_excess_precision=false</code>，约束 Pallas 核周围算子的多余中间精度。长轨迹按固定大小分块评估，分页 KV 缓存向前传递；反向沿缓存连接传播梯度，参数梯度贡献在优化器更新前合并。</li>
+</ol>
+<h2>评测</h2>
+<p>200 步数值验证，合成 FrozenLake 环境，公开 Qwen3-8B 检查点作基线，64 块 TPU v5p、DP8×TP8 网格，GSPO-token 损失配 leave-one-out 优势。对比三组：标准训练（训练器旧 logprob、无额外采样器修正）、token 级截断重要性采样（TIS）、Zero-TIM。标准组与 TIS 组保留了非零差异：TIS 调整了差异对更新的贡献，但没有去掉底层的失配。</p>
+<h2>意义</h2>
+<p>消除训练-推理失配已经迅速成为稳定大规模强化学习收敛的前沿要求。开源社区近期的努力——包括 vLLM 与 TorchTitan、RadixArk/LMSys Miles——已经证明，批量不变核与逐位数值对齐能防止策略优化里的 off-policy 漂移。Zero-TIM 把这套契约的模块化 JAX/XLA 与 Pallas 实现带到 TPU，放在 Google 开源的 JAX 原生大模型强化学习与后训练库 Tunix 里；线性注意力与 MoE 架构的支持正在扩展。</p>
+<h2>公众号文章</h2>
+<p>Google Zero-TIM：TPU 强化学习采样与训练的 logprob 逐位对齐，解题率 88.2%（草稿，2026-11-20 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GKK3qVn_1O6yqGQfXfgKMl9ByXs-FZJrR4pRHf2ynEfI</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
