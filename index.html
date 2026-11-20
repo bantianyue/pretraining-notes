@@ -968,6 +968,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">强化学习</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span>收藏于 2026-11-20</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">87</span>《Google 流式 DiLoCo：按层切 65 片逐片同步，跨城低带宽训练 9.57 倍加速》10 Gbit/s 链路步时间纹丝不动，通信量少 65 倍</h3>
+  <p>跨数据中心跑标准数据并行训练时，慢速广域网传输盖不住计算，训练被网络拖住。流式 DiLoCo 把模型参数切成 P 个互不重叠的片段，在 H 步里每个片段恰好同步一次，与香草 DiLoCo 的外循环节拍完全相同，但不再每 H 步停下来搬整个模型。Qwen3-32B 在 2 块 TPU v5p-32 上的实测：10 Gbit/s 链路上数据并行退化到 55.11 秒每步，流式 DiLoCo 保持 5.76 秒每步；两组 MoE 预训练的验证损失还略好于同步基线。</p>
+  <div class="links">
+    <a class="cn" href="pages/streaming-diloco-maxtext.html">中文精读 →</a>
+    <a class="en" href="https://developers.googleblog.com/distributed-llm-training-across-metros-streaming-diloco-in-maxtext/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">分布式训练</span><span class="tag">低带宽</span><span>收藏于 2026-11-20</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
