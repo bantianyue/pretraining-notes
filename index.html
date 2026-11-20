@@ -948,6 +948,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">投机解码</span><span class="tag">推理优化</span><span>收藏于 2026-11-20</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">85</span>《Zero-TIM：TPU 强化学习采样与训练的 logprob 逐位对齐》64 块 TPU v5p 上三条路径逐位相同，解题率 88.2%</h3>
+  <p>大模型强化学习里，采样器与训练器在同一套权重下给同一个动作算出不同的 logprob，根因是浮点算术：规约顺序与中间精度在两条执行路径上没有对齐。Zero-TIM 用四步把算术锁死——片内 Pallas 核、跨片规约顺序、共用 log-softmax 尾部、自定义 VJP——在 64 块 TPU v5p 上让三条路径的动作 logprob 逐位相同；FrozenLake 验证里 logprob 差异每步都是零，解题率 88.2%。</p>
+  <div class="links">
+    <a class="cn" href="pages/zero-tim-tpu-rl.html">中文精读 →</a>
+    <a class="en" href="https://developers.googleblog.com/unlocking-stable-on-policy-rl-on-tpu-with-bitwise-zero-traininference-mismatch/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">强化学习</span><span class="tag">TPU</span><span class="tag">训练推理一致性</span><span>收藏于 2026-11-20</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
