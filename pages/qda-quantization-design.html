@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QDA：智能体闭环设计量化配方 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>QDA：智能体闭环设计量化配方</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/abs/2611.23388">https://arxiv.org/abs/2611.23388</a></div>
+<h1>QDA：智能体闭环设计量化配方</h1>
+<ul>
+<li>原文：<a href="https://arxiv.org/abs/2611.23388">QDA: Closed-Loop LLM Quantization Design with Agents</a>（arXiv 2611.23388，MIT / NVIDIA，Xingyang Li、Tianlang Zhao、Song Han、Ligeng Zhu，2026-11-20 收藏）</li>
+<li>主题：低精度量化、训练推理一致性、智能体优化、推理优化</li>
+<li>星级：⭐⭐⭐⭐（重点阅读）</li>
+<li>一句话要点：最优量化配方随模型与精度变化，QDA 让智能体按四步循环为每对模型与精度单独搜索配方：KL 分钟级打分 + 长生成抽检 + 21 种方法可组合库；四个推理模型上比最强公开配方平均高 0.9、1.4、2.2 个点，GLM-5.3-Flash NVFP4 恢复 FP8 精度的 98.3%。</li>
+</ul>
+<h2>核心结论</h2>
+<p>最优量化配方没有通用答案：同一个精度下，Qwen3.5-9B 上最准的公开配方是 ParoQuant，DeepSeek-R1-Distill-Llama-8B 上是 GPTQ；AWQ 在 Qwen3.5-9B 的 W4A16 比 GPTQ 高 5.1 个点，W3A16 反而低 12.3 个点。QDA 把配方设计交给智能体：每个模型与精度单独搜索，64 个 GPU 小时内找到专属配方。四个推理模型上，QDA 比最强公开配方平均高 0.9、1.4、2.2 个点（W4A16、W4A8、W3A16）；3200 亿参数的 GLM-5.3-Flash 在 NVFP4 下恢复 FP8 精度的 98.3%，高于 NVIDIA 与 Red Hat AI 发布的检查点（96.9% 与 96.3%）；所有 QDA 检查点跑在现有服务核上，推理零额外开销。</p>
+<h2>为什么配方设计难：两个贵</h2>
+<p>评测贵：推理模型每道题写上万 token 的思考链、每题采样几十次，完整评测一个量化检查点要 23 到 86 个 GPU 小时。搭建贵：多数 PTQ 方法以研究代码发布，只支持论文里的模型族，混用要手工移植；llm-compressor 0.13 的 GPTQ 逐层求解，256 个专家的 Qwen3.6-35B-A3B 一次构建约 16 个 GPU 小时，占一次搜索预算的四分之一。</p>
+<h2>四步循环</h2>
+<p>智能体按四步循环设计配方：(1) 提一个配方；(2) 方法库建成候选检查点；(3) 评估器用 KL 散度打分，数分钟完成；(4) 少数有潜力的候选写完整长答案，找循环这类故障。预算用完时提交自认最好的检查点，只有它接受测试基准的完整评测。</p>
+<h2>KL 分钟级打分</h2>
+<p>逐层误差一次只看一层，看不见跨层累积的误差：Qwen3.5-9B 在 W4A16 下，逐层误差偏爱 GPTQ，但 AWQ 的平均精度高 5.1 个点。QDA 比较整个量化模型与原始模型下一 token 分布的 KL 散度，在原始模型写的参考推理轨迹上算。原始模型每位置的全词表分布存下来要 0.21 到 0.56 TB，评估器只保留每位置最可能的 128 个 token 与一个“其余”桶，估计比完整 KL 低 0% 到 0.4%。原始模型的 top-k 分布缓存一次（约 1 GB），打分只跑候选检查点，比完整评测便宜 350 到 990 倍。44 对检查点上，KL 与精度排序一致的占 82%，逐层误差是 73%。</p>
+<p>打分在 vLLM 引擎内部规约：评估器挂进工作进程的提示 log 概率，在原地把全词表分布规约成估计式的项，只有求和结果离开引擎。两个检查点的 KL 差小于 σ（0.5% 到 1.6%）时记为平局，避免智能体对随机差异采取行动。</p>
+<h2>长生成抽检</h2>
+<p>只有思考结束后的答案才计分，循环或写不完思考的模型整道题得零分，量化会让这种情况更可能出现，故障多在长答案后段才出现。步骤 (4) 里智能体挑一个候选，让它给自己选的难题写完整答案，数写错、循环、截断的答案数，与 KL 一起权衡下一步。实例：Qwen3.6-35B-A3B 在 W4A16 下，用自生成数据校准 GPTQ 把 KL 降了 30%，抽检却发现 191 个答案里 12 个在长度上限截断（原始模型 3 个）；智能体记下截断数是关键信号，一分钟后生成 600 道长答案难题，补上 1200 条量化模型自己写的长答案做尺度蒸馏，最终比最强公开配方高 1.3 个点。</p>
+<h2>可组合方法库</h2>
+<p>21 种公开 PTQ 方法收进一个库，覆盖变换、舍入、缩放调优、校准数据四类选择。把任意方法用在 vLLM 能加载的检查点上，产出的新检查点 vLLM 也能加载，方法因此能按配方步骤任意叠加。AWQ、旋转这类方法要知道哪个归一化层喂给哪些线性层，研究代码把模块名按模型族硬编码；方法库从模型本身推导这些关系并逐个数值验证，支持 GLM-5.3-Flash（288 个专家、主搜索没见过的新模型）只用了一个 72 行适配器。方法库按服务核实际存的缩放挑编码（vLLM 的 W4A8 核把缩放存为 FP8，而 llm-compressor 按 BF16 缩放挑编码）。同一层专家是形状相同的独立问题，方法库把二阶统计量叠起来一次批量分解全解掉，Qwen3.6-35B-A3B 的一次 GPTQ 构建从约 16 个 GPU 小时降到 0.42 个，KL 相差不到 1%。</p>
+<h2>调度器：隔离与排队</h2>
+<p>智能体如果能读到评估器，就能不改进模型而压低 KL（比如直接在参考轨迹上校准）。调度器把参考轨迹与测试基准挡在智能体之外：智能体在无 GPU、无网络（除模型 API 外）的沙箱里工作，沙箱外的监督器检查并记录每次工具调用；评估器在沙箱外跑只读代码；每次打分读冻结的检查点副本，只返回 KL 值。智能体能读的每个文件事先都按测试题扫描过。调度上，所有任务进一个优先队列，KL 打分插到排队的构建前面、不打断正在跑的任务；预计跑过截止时间的任务不启动。12 次搜索里，KL 打分在请求后中位 5 秒启动，GPU 忙碌率 72%。</p>
+<h2>评测结果</h2>
+<p>四个推理模型：Qwen3.5-9B、Qwen3.8-27B（稠密 Gated DeltaNet 混合）、Qwen3.6-35B-A3B（256 专家混合 MoE）、DeepSeek-R1-Distill-Llama-8B。每个模型与精度对一次搜索：8 块 GH200 跑 8 小时（64 个 GPU 小时），智能体 token 花费 19 到 75 美元。QDA 在 W4A16、W4A8、W3A16 下比最强公开配方平均高 0.9、1.4、2.2 个点；Qwen3.8-27B 在 W4A16 下甚至比 BF16 高 0.3 个点；DeepSeek-R1-Distill-Llama-8B 在 W3A16 下比 GPTQ 高 6.1 个点。W4A8 的增益在 Qwen3.5-9B 上最大：默认 GPTQ 与 AWQ 比 BF16 低 17 到 18 个点，QuaRot+GPTQ 追回 9.9 个点，QDA 的配方再叠加自生成数据、FP8 缩放搜索与尺度蒸馏，比 QuaRot+GPTQ 高 5.2 个点。</p>
+<p>GLM-5.3-Flash NVFP4：QDA 平均恢复 FP8 精度的 98.3%，除 GPQA-Diamond 一项比 Red Hat AI 低 0.1 个点外，每项基准都是三者里最准的；量化的模块比两家都多，检查点最小（183.6 GiB，对 190.4 与 184.3 GiB）。效率上，QDA 不增加推理开销，W4A16 下解码比 ParoQuant 快 1.30 到 1.75 倍（ParoQuant 加在线旋转）；答案比最强公开配方平均短 4%，撞上长度上限的少 1.7 个点。</p>
+<h2>消融：智能体与基础设施都不可少</h2>
+<p>Qwen3.6-35B-A3B 上一次换掉一个部件。换掉智能体（贪心搜索、ASHA 搜同一个库）：QDA 在 W4A8 与 W3A16 赢 0.2 到 1.2 个点，W4A16 下相差不到 0.1 个点。换掉基础设施（公开方法库 + 普通 GPU 队列，剩下的代码智能体自己写）：QDA 平均高 0.2 到 0.5 个点、波动更小；没有方法库，智能体代码量是三倍（平均 3100 行对 1100 行），一次都没试过旋转——正是 QDA 在 W4A8 上拉开差距最大的步骤；多启动 50% 的任务，浪费在失败或取消任务上的 GPU 小时是两倍（6.6% 对 3.1%）。同一个智能体换成 NVIDIA ModelOpt 及其配方搜索技能，即使直接在测试基准上选候选，仍比 QDA 低 0.5 到 1.3 个点，W4A8 与 W3A16 下甚至低于最强公开配方。</p>
+<h2>搜索发现了什么</h2>
+<p>12 个最终配方在每个阶段都不同。没有哪种公开做法对所有模型与精度都有帮助：W4A16 下，自生成数据校准把 Qwen3.6-35B-A3B 的 KL 降 30%，却抬高了 R1-Llama 的 KL；默认校准文本上的尺度蒸馏帮 R1-Llama、不帮 Qwen3.6-35B-A3B；AWQ 的缩放把 Qwen3.5-9B 的 KL 降了三分之一，在 Hadamard 旋转之后几乎没用。看整个配方，降 KL 最多的步骤也各不相同：5 次搜索是旋转，4 次是蒸馏，2 次是自生成数据，1 次是 FP8 缩放搜索。</p>
+<p>每个最终配方都在智能体自己选的提示上用自生成数据校准或蒸馏；12 个里有 10 个还训练了量化模型自己写的答案；5 个保留了智能体写的训练或合并代码。智能体还从日志里自己诊断问题：Qwen3.5-9B 在 W4A16 下，把蒸馏损失的尖峰追溯到 BF16 缩放同时越过舍入边界、让 Adam 步长跳变，于是调大 Adam 的 ϵ；DeepSeek-R1-Distill-Llama-8B 在 W3A16 下，发现自己的舍入代码给了缩放零梯度并修好；Qwen3.8-27B 在 W4A8 下跳过蒸馏，因为核把每个缩放存为 FP8，FP8 缩放的最小一档变化会把整组权重重缩放至少 6%，步子太大、没法微调。</p>
+<p>12 个最终配方里有 5 个遵循同一模式（自生成数据上校准 GPTQ，再做尺度蒸馏），固定设置直接应用：W4A16 下在四个模型上都达到或超过最强公开配方，但每个模型都低于 QDA；Qwen3.5-9B 上，W4A8 与 W3A16 下分别比 QDA 低 2.2 与 5.0 个点——即使是这个固定配方也搬不到别的模型与精度上。</p>
+<h2>启示</h2>
+<p>决定成败的不是智能体本身：同一个智能体换成 ModelOpt 的工作流与工具，落后 0.5 到 1.3 个点；换成贪心搜索或 ASHA，W4A8 与 W3A16 下也落后。让智能体搜索跑起来的，是便宜又诚实的代理指标、可组合的方法库与守住预算的调度器：缺少便宜的代理指标，搜索在预算内跑不完；缺少诚实的隔离，智能体会钻评估器的空子；缺少可组合的方法库，候选根本搭建不出来。配方设计正在从专家手艺变成搜索问题，而搜索的胜负手在基础设施，不在智能体。</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
