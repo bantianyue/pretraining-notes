@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FLAMIA：把量化器放进因果掩码，低比特注意力在 Blackwell 上快 1.42 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>FLAMIA：把量化器放进因果掩码，低比特注意力在 Blackwell 上快 1.42 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.zhongzhuzhou.org/blog/2026-11-08-flamia-technical-review-en/">https://www.zhongzhuzhou.org/blog/2026-11-08-flamia-technical-review-en/</a></div>
+<h1>FLAMIA：把量化器放进因果掩码，低比特注意力在 Blackwell 上快 1.42 倍</h1>
+<p><strong>原文</strong>：https://www.zhongzhuzhou.org/blog/2026-11-08-flamia-technical-review-en/（Zhongzhu Zhou 技术综述，论文 arXiv:2611.03344v1，作者 Velikonivtsev、Koltakov、Kuznedelev，2026-11-02）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-21 | <strong>主题</strong>：低精度量化、GPU kernel、训练框架</p>
+<h2>一句话要点</h2>
+<p>注意力量化到低比特时，量化器先看了后面的值才决定怎么舍入前面的值，标准因果掩码管不住这条依赖。FLAMIA 把尺度几何改成文档内 32 token 块共享一个指数：前向与反向的收缩复用同一套 E4M3 码，分数计算需要时走混合 NVFP4/FP8。默认 MXFP8 的打包因果训练调用在 B200 上快 1.10–1.40 倍，B300 上快 1.06–1.42 倍，最高 1.42 倍。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>后缀能改写前缀的重建</strong>：两值反例：查询 1 只读值 1，后缀值从 2 变 6，共享尺度从 1 变 3，值 1 的重建从 1 变成 0，掩码本身没动。</li>
+<li><strong>一个指数管两个方向</strong>：文档内 32 token 块共享指数，前向与反向收缩复用同一套 E4M3 码；分数用 FP4 帮忙的场合走混合 NVFP4/FP8 路线。</li>
+<li><strong>打包调用快 1.42 倍，代价有数</strong>：B300 上 8192+224×256 形状 1.67 ms 对 2.37 ms；1B 预训练损失只涨 0.005，但 ARC Challenge 掉 3.07 个百分点。</li>
+</ul>
+<h2>因果掩码为什么管不住量化器</h2>
+<p>标准因果掩码只约束注意力分数：位置 i 不能看到位置 j &gt; i 的分数。但量化发生在分数之前——量化器按一整块值的分布选尺度，后缀值的变化会改写前缀值的重建。FLAMIA 把尺度选择本身放进因果掩码：文档内 32 token 块共享一个指数，块内尺度只由块内已见的值决定；对角边界上的逐键折叠与前缀尺寸的累加器放大，是顺着这条依赖补上的两个口子。</p>
+<h2>速度与代价</h2>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>数值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>打包因果调用（B200，MXFP8）</td>
+<td>快 1.10–1.40 倍</td>
+</tr>
+<tr>
+<td>打包因果调用（B300，MXFP8）</td>
+<td>快 1.06–1.42 倍</td>
+</tr>
+<tr>
+<td>B300 8192+224×256 形状</td>
+<td>1.67 ms 对 2.37 ms（1.42 倍）</td>
+</tr>
+<tr>
+<td>预处理（MXFP8）</td>
+<td>789 → 261 μs</td>
+</tr>
+<tr>
+<td>预处理（NVFP4）</td>
+<td>640 → 110 μs</td>
+</tr>
+<tr>
+<td>混合反向</td>
+<td>1329 TFLOP/s（全 4 比特 571，BF16 1015）</td>
+</tr>
+<tr>
+<td>显存</td>
+<td>2.7 GB 对 16.8 GB（6.22 倍）</td>
+</tr>
+<tr>
+<td>因果 dQ 尺度代价</td>
+<td>反向 8–11%，完整调用 6–9%（32,768 token）</td>
+</tr>
+</tbody>
+</table>
+<h2>1B 预训练结果（约 100B token）</h2>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>损失</th>
+<th>五任务均值</th>
+<th>ARC Challenge</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BF16</td>
+<td>2.392</td>
+<td>0.5832</td>
+<td>基线</td>
+</tr>
+<tr>
+<td>MXFP8</td>
+<td>2.397</td>
+<td>0.5737</td>
+<td>掉 3.07 个百分点</td>
+</tr>
+<tr>
+<td>混合</td>
+<td>2.406</td>
+<td>0.5814</td>
+<td>掉 2.48 个百分点</td>
+</tr>
+</tbody>
+</table>
+<p>精确因果探针零变化（带因果 dQ 尺度）。两个数字要分开读：1.42 倍是默认 MXFP8 在打包因果调用上的计时，零变化是严格选项在批量因果探针上的依赖结论。换形状、换布局、换评测核，排名都可能变，这是论文自己在附录里给出的限定。</p>
+<h2>公众号文章</h2>
+<p>FLAMIA:把量化器放进因果掩码,低比特注意力在Blackwell上快1.42倍（草稿，2026-11-21 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GMPSgAxUvwE4xVNArmqll_-NqE5paj5dAFz0BvbscYIN</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
