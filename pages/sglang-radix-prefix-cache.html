@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang Radix 前缀缓存上 TPU：Qwen2.5-7B 吞吐涨 63%，混合模型上却拖后腿 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SGLang Radix 前缀缓存上 TPU：Qwen2.5-7B 吞吐涨 63%，混合模型上却拖后腿</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://kitrakrev.github.io/projects/sglang-tpu-agent-serving/">https://kitrakrev.github.io/projects/sglang-tpu-agent-serving/</a></div>
+<h1>SGLang Radix 前缀缓存上 TPU：Qwen2.5-7B 吞吐涨 63%，混合模型上却拖后腿</h1>
+<p><strong>原文</strong>：https://kitrakrev.github.io/projects/sglang-tpu-agent-serving/（Karthik Raja Anandan，2026-11-18，SGLang on Cloud TPU v6e）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-21 | <strong>主题</strong>：KV 缓存、推理优化、TPU、并行策略（推理）</p>
+<h2>一句话要点</h2>
+<p>多轮 Agent 每轮重发同一份长系统提示加不断变长的历史，服务速度取决于前缀缓存复用。SGLang 的 radix 前缀缓存在 TPU v6e-1 上把 Qwen2.5-7B 从 930 推到 1,515 输出 token/s（c=32），TTFT p99 从 598 毫秒降到 134 毫秒，命中率 84–88%，全部请求落在 200 毫秒 SLO 内。同一面旗子在混合线性注意力模型上反噬：Qwen3.8-27B 开缓存后每个并发都更慢。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>缓存让 TTFT 尾部压平</strong>：v6e-1 上 Qwen2.5-7B，c=32 时吞吐 930 → 1,515 token/s，TTFT p99 598 → 134 ms，命中率 84–88%，100% 请求在 200 ms SLO 内。</li>
+<li><strong>混合线性注意力上缓存反噬</strong>：Qwen3.8-27B 开缓存处处更慢：快照只落在 1,024 token 边界，命中率 32–38%，最大运行请求从 96 掉到 27。</li>
+<li><strong>H100 快 1.65–2 倍，TPU 赢在尾延迟</strong>：c=32 时 H100 2,502 token/s 对 v6e-1 的 1,515；A100 与 v6e-1 大致打平，但 v6e-1 的 TTFT p99 是 134 ms 对 410 ms。</li>
+</ul>
+<h2>Run A：前缀缓存在 Qwen2.5-7B 上</h2>
+<p>c=32 时吞吐 930 → 1,515 tok/s、TTFT p99 598 → 134 ms、命中率 84–88%。c=96 见顶 2,755 tok/s（按需约 $0.27/1M token）。c=128 时 KV 驱逐、命中率 88% → 75%、TTFT p50 涨 10 倍。解码是 HBM-bound：下限 15.2 GB / 1.64 TB/s = 9.3 ms，实测 ITL 12.9 ms（73% roofline）/ 19.8 ms（55%）。</p>
+<h2>Run B：缓存反拖后腿</h2>
+<p>Qwen3.8-27B（48 层 Gated-DeltaNet + 16 层全注意力）开缓存处处更慢：命中率 32–38%，最大运行请求 96 → 27，ITL 在 c=1 时 12.0 → 26.7 ms。根因是快照只落在 1,024 token 边界，循环状态检查点太贵，缓存复用省下的 prefill 抵不过快照与驱逐的代价。</p>
+<h2>Run C：int8 权重与 OLMo 移植</h2>
+<p>int8 仅权重：c=32 时 1,505 → 2,342 tok/s、ITL 20.1 → 12.9 ms、KV 池 232k → 345k token，无精度评测。OLMo 2/3 prefill 慢 10–30 倍（32 KV 头、fallback 查询块 2 vs 32）。</p>
+<h2>三卡对比：按 HBM 字节算其实一样</h2>
+<table>
+<thead>
+<tr>
+<th>卡</th>
+<th>c=32 吞吐</th>
+<th>TTFT p99</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>v6e-1</td>
+<td>1,515 tok/s</td>
+<td>134 ms</td>
+<td>尾延迟最好</td>
+</tr>
+<tr>
+<td>H100</td>
+<td>2,502 tok/s</td>
+<td>—</td>
+<td>快 1.65–2 倍</td>
+</tr>
+<tr>
+<td>A100</td>
+<td>与 v6e-1 大致打平</td>
+<td>410 ms</td>
+<td>尾延迟差 3 倍</td>
+</tr>
+</tbody>
+</table>
+<p>三卡 c=1 时均约 73% roofline；H100 的差距主因是带宽（3.35 vs 1.64 TB/s），不是软件。</p>
+<h2>结论</h2>
+<p>前缀缓存不是通用加速开关：它跳过的是 prefill 的 FLOPs，不是 decode 的 KV 读取，所以 TTFT 能压 4.5 倍、ITL 几乎不动；它在纯注意力模型上值 63%，在混合线性注意力模型上要先有更便宜的循环状态检查点才划算。报数要报 SLO 内的 goodput。</p>
+<h2>公众号文章</h2>
+<p>SGLang Radix前缀缓存上TPU:Qwen2.5-7B吞吐涨63%,混合模型上却拖后腿（草稿，2026-11-21 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GANNwP35HWeWXvUz4OKx2Zn-rVJV1iY9qC7YKT1_ERt3</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
