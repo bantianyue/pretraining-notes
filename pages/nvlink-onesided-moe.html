@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA NVLinkOneSided：MoE 通信改单边直写，GB200 上跑满约 80% NVLink 带宽 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>NVIDIA NVLinkOneSided：MoE 通信改单边直写，GB200 上跑满约 80% NVLink 带宽</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://nvidia.github.io/TensorRT-LLM/latest/blogs/tech_blog/blog18_Optimizing_MoE_Communication_with_One_Sided_AlltoAll_Over_NVLink.html">https://nvidia.github.io/TensorRT-LLM/latest/blogs/tech_blog/blog18_Optimizing_MoE_Communication_with_One_Sided_AlltoAll_Over_NVLink.html</a></div>
+<h1>NVIDIA NVLinkOneSided：MoE 通信改单边直写，GB200 上跑满约 80% NVLink 带宽</h1>
+<p><strong>原文</strong>：https://nvidia.github.io/TensorRT-LLM/latest/blogs/tech_blog/blog18_Optimizing_MoE_Communication_with_One_Sided_AlltoAll_Over_NVLink.html（NVIDIA TensorRT-LLM 技术博客）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-21 | <strong>主题</strong>：并行策略（推理）、MoE、NVLink、GPU kernel</p>
+<h2>一句话要点</h2>
+<p>MoE 推理里，注意力用数据并行、专家用专家并行时，token 的路由专家常在别的卡上，通信决定性能。NVIDIA TensorRT-LLM 的 NVLinkOneSided AlltoAll 把这段通信改成单边直写：dispatch 核只写对端对称内存，combine 核只读，接收侧不再搬运；GB200 NVL72 上，批量够大时 dispatch 与 combine 都跑到峰值 NVLink 带宽的约 80%。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>单边直写，接收侧零搬运</strong>：对称内存就是接收缓冲，dispatch 返回对称内存的 tensor view，MoE 原地消费；rank-major 布局按源 rank 分槽，同一 token 每对 rank 只存一次。</li>
+<li><strong>GB200 上约 80% 峰值带宽</strong>：ep_size=8、批量够大时 dispatch 与 combine 都到峰值 NVLink 带宽的约 80%；NVFP4 后量化 dispatch 在 bsz=2048 时提速 3.06 倍。</li>
+<li><strong>量化无关，同一条路走任意配方</strong>：AlltoAll 只搬不透明字节，FP8 块缩放、MXFP8、NVFP4、BF16 共用同一条代码路径；combine 默认 BF16，另有可选 FP8 低精度路径。</li>
+</ul>
+<h2>为什么双边 AlltoAll 不够快</h2>
+<p>传统实现是双边握手：发送方与接收方配对、各自走一次搬运，接收侧还要把数据从通信缓冲搬进 MoE 的计算缓冲。NVLinkOneSided 把接收缓冲本身变成对称内存：每块卡在本地分配一段，所有卡都能直接读写；dispatch 核直接写对端缓冲的指定槽位，写完只发一个 flag，接收侧读 flag 后原地消费，连 tensor view 都不用再拷。</p>
+<h2>三条思路</h2>
+<table>
+<thead>
+<tr>
+<th>思路</th>
+<th>解决的成本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单边直写</td>
+<td>去掉收发配对与接收侧搬运</td>
+</tr>
+<tr>
+<td>rank-major 接收缓冲</td>
+<td>去掉重复 token 与多余缓冲</td>
+</tr>
+<tr>
+<td>量化无关接口</td>
+<td>去掉随配方改核的成本</td>
+</tr>
+</tbody>
+</table>
+<p>同步靠两道生产者-消费者屏障：dispatch 写完数据后用 release 栅栏发 flag，combine 侧 acquire 栅栏读到 flag 后才读数据；向量化访存与模板展开的 top_k 循环把 NVLink 喂饱。</p>
+<h2>随批量扩展：bsz=2048 时的带宽</h2>
+<p>GB200 NVL72 单向 NVLink 带宽 900 GB/s。ep_size=8 时，dispatch 与 combine 带宽随批量增长：</p>
+<table>
+<thead>
+<tr>
+<th>批量</th>
+<th>分发（微秒）</th>
+<th>分发（GB/s）</th>
+<th>汇聚（微秒）</th>
+<th>汇聚（GB/s）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>18.9</td>
+<td>6.07</td>
+<td>31.0</td>
+<td>3.70</td>
+</tr>
+<tr>
+<td>64</td>
+<td>22.3</td>
+<td>328.68</td>
+<td>34.1</td>
+<td>215.18</td>
+</tr>
+<tr>
+<td>512</td>
+<td>89.5</td>
+<td>656.24</td>
+<td>91.7</td>
+<td>640.56</td>
+</tr>
+<tr>
+<td>2048</td>
+<td>311.8</td>
+<td>753.28</td>
+<td>322.6</td>
+<td>728.20</td>
+</tr>
+</tbody>
+</table>
+<p>批量够大时 dispatch 与 combine 都达到峰值带宽的约 80%。大批量下 dispatch 略高于 combine，尽管 dispatch 还要算路由与槽位下标，因为 combine 在同样载荷上还要多做一次 top_k 路归约。</p>
+<h2>后量化 dispatch：NVFP4 提速 3.06 倍</h2>
+<p>激活先量化再发：NVFP4 把 dispatch 载荷压到 BF16 的约 28%，bsz=2048 时 dispatch 提速 3.06 倍。combine 默认走 BF16 保数值，另有可选的 FP8 低精度路径。评测用 DeepSeek-V3 画像、逻辑带宽口径，含本 rank 不走 NVLink 的流量，读数时按同一口径对照。</p>
+<h2>复现</h2>
+<p>评测脚本在仓库里（bench_moe_comm.py），不随容器发布。NVLinkOneSided 是单 NVLink 域内的默认通信策略。</p>
+<h2>公众号文章</h2>
+<p>NVIDIA TensorRT-LLM NVLinkOneSided:MoE通信改单边直写,GB200上跑满约80% NVLink带宽（草稿，2026-11-21 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GNdGRGTH__vwZm41WGr5aljjvCzARy7uz1adRdyMnaqC</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
