@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 首日支持 Inkling 2 Mini：12 层循环跑三遍，每遍自带 KV 缓存 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vLLM 首日支持 Inkling 2 Mini：12 层循环跑三遍，每遍自带 KV 缓存</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vllm.ai/blog/2026-11-20-inkling2-mini">https://vllm.ai/blog/2026-11-20-inkling2-mini</a></div>
+<h1>vLLM 首日支持 Inkling 2 Mini：12 层循环跑三遍，每遍自带 KV 缓存</h1>
+<p><strong>原文</strong>：https://vllm.ai/blog/2026-11-20-inkling2-mini（vLLM 官方博客，2026-11-20）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-21 | <strong>主题</strong>：训练框架、推理优化、KV 缓存、循环模型</p>
+<h2>一句话要点</h2>
+<p>Thinking Machines 发布 Inkling 2 Mini 当天，vLLM 就在 Blackwell、Hopper 与 DGX Spark 上支持了它。这是一个循环模型：中间 12 层每 token 跑三遍，权重共享，每遍有自己的 KV 缓存，并通过门控消息读上一遍。多模态 MoE，26B 总参数、3.5B 激活参数，上下文可达 1M token，自带 DSpark 推测解码。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>中间 12 层跑三遍</strong>：24 层分前奏 0–5、循环核 6–17、尾声 18–23；循环核权重共享跑三遍，每遍从前奏输出出发，只通过门控消息看到上一遍。</li>
+<li><strong>每遍自带记忆</strong>：每遍每核层各一套 KV 缓存与卷积状态缓存，24 层对应 48 套 KV 缓存；DSpark 草稿在 4 个层访问点读目标隐状态。</li>
+<li><strong>可变循环能调遍数</strong>：研究检查点用 loop_num_passes 选遍数、loop_share_cache 选是否共享 KV 缓存；GB200 上 1 遍 1.51 ms、3 遍 3.85 ms，共享缓存只换来容量提升。</li>
+</ul>
+<h2>循环结构：门控消息</h2>
+<p>每遍的循环核层之间不直接传隐状态，改传一条门控消息：h = W_down·[rms(input), rms(message)]，out = (1−tanh(W_forget·h))·input + tanh(W_gain·h)·message。12 核层 × 4 输入 = 48 条消息/token。隐层 2,304，128 路由专家 top-8，NVFP4（0–19 层）/MXFP8（20–23 层）。</p>
+<h2>vLLM 怎么服务循环</h2>
+<p>vLLM 把每遍的缓存当作普通缓存层管理，不用为循环写特殊调度：缓存按层注册、消息读取与控制器融合、核从 4,608 维泛化到 2,304 维。DSpark 草稿在 4 个层访问点读目标隐状态。</p>
+<h2>GB200 TP1、4K 上下文实测</h2>
+<table>
+<thead>
+<tr>
+<th>遍数</th>
+<th>延迟（ms）</th>
+<th>容量（token）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 遍</td>
+<td>1.51 / 3.81</td>
+<td>352K</td>
+</tr>
+<tr>
+<td>2 遍</td>
+<td>2.67 / 5.92</td>
+<td>233K</td>
+</tr>
+<tr>
+<td>3 遍</td>
+<td>3.85 / 8.11</td>
+<td>175K</td>
+</tr>
+<tr>
+<td>3 遍共享 KV</td>
+<td>3.86 / 8.10</td>
+<td>194K</td>
+</tr>
+</tbody>
+</table>
+<p>循环结构的关键不在多跑两遍，而在每遍的隔离：每遍从前奏输出出发、只通过门控消息看到上一遍，每遍自带 KV 与卷积状态缓存。遍数是可调的旋钮，不是固定设计。</p>
+<h2>公众号文章</h2>
+<p>vLLM首日支持Inkling 2 Mini:12层循环跑三遍,每遍自带KV缓存（草稿，2026-11-21 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GLpDqKkYttKBdMhgCMTssfiUx3vFVmAPoqcw7Y7Cu3Xd</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
