@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LMSYS DeepSeek-V4.1-Flash H20：八处改动，端到端延迟降 65.5%，吞吐涨 2.91 倍 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>LMSYS DeepSeek-V4.1-Flash H20：八处改动，端到端延迟降 65.5%，吞吐涨 2.91 倍</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.lmsys.org/blog/2026-11-19-deepseek-v41-h20">https://www.lmsys.org/blog/2026-11-19-deepseek-v41-h20</a></div>
+<h1>LMSYS DeepSeek-V4.1-Flash H20：八处改动，端到端延迟降 65.5%，吞吐涨 2.91 倍</h1>
+<p><strong>原文</strong>：https://www.lmsys.org/blog/2026-11-19-deepseek-v41-h20（LMSYS Blog）
+<strong>星级</strong>：4 星 | <strong>收藏日期</strong>：2026-11-21 | <strong>主题</strong>：并行策略（推理）、PD 分离、低精度量化、推理优化</p>
+<h2>一句话要点</h2>
+<p>DeepSeek-V4.1-Flash 在 8 卡 H20-3e 上用 SGLang 的 PD 分离部署跑 64K 输入时，Prefill 先排队：基线 TP4 下平均端到端 13.63 秒、首 token 12.04 秒。七处改动之后，平均端到端降到 4.70 秒（降 65.5%），输出吞吐从 847 涨到 2,465 token/s（2.91 倍）；其中 Prefill 交错 CP 加 Decode DP 一步降 44.64%，FP8 DeepGEMM 打分再降 29.85%。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>Prefill CP 加 Decode DP 是最大头</strong>：一步端到端降 44.64%。Prefill 用交错 CP 把长请求 token 行分到 4 卡，Decode 用 DP 把不同请求分到 4 卡；首 token 从 12.04 秒降下来。</li>
+<li><strong>FP8 DeepGEMM 打分再降三成</strong>：Indexer 打分改 FP8 E4M3，64K 探针里 1,677 万个采样键值无一需截断，与 BF16 打分共享 99.08% 的 top-k 选择；端到端再降 29.85%。</li>
+<li><strong>同卡部署每卡吞吐更高</strong>：单机 4 卡同卡部署端到端从 18.62 秒降到 7.96 秒，每卡 371 token/s 高于 PD 分离的 308；代价是每 token 时间从 3.20 涨到 5.62 毫秒。</li>
+</ul>
+<h2>评测口径</h2>
+<p>256 个请求、24 并发、61,440 共享前缀 + 4,096 token 增量、500 token 输出、10 次热身后 flush 缓存，缓存命中 93.21%。七处改动分工清楚：并行方式改的是 Prefill 与 Decode 各自的切分，FP8 打分与分块放大改的是 Indexer 的算量与复用，选择融合与 K 块复用改的是验证路径的重复劳动，可打断 CUDA Graph 改的是长 Prefill 的核启动。每一处都有独立的服务基准对照，百分比按相邻行算，不能跨行相加。</p>
+<h2>八处改动</h2>
+<table>
+<thead>
+<tr>
+<th>招数</th>
+<th>改动</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第 1 招</td>
+<td>Prefill 交错 CP，Decode 用 DP</td>
+</tr>
+<tr>
+<td>第 2 招</td>
+<td>Prefill Indexer 改 FP8 DeepGEMM 打分</td>
+</tr>
+<tr>
+<td>第 3 招</td>
+<td>可打断 CUDA Graph 管 Prefill</td>
+</tr>
+<tr>
+<td>第 4 招</td>
+<td>MoE 从专家并行改张量并行</td>
+</tr>
+<tr>
+<td>第 5 招</td>
+<td>Indexer 打分块放大到 2 GiB</td>
+</tr>
+<tr>
+<td>第 6 招</td>
+<td>Prefill 选择与写回融合成一个核</td>
+</tr>
+<tr>
+<td>第 7 招</td>
+<td>验证时复用分页 Indexer K 块</td>
+</tr>
+<tr>
+<td>第 8 招</td>
+<td>同卡部署再进一步</td>
+</tr>
+</tbody>
+</table>
+<h2>累计效果与同卡部署</h2>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>平均端到端</th>
+<th>输出吞吐</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP4 基线</td>
+<td>13,633.80 ms</td>
+<td>846.76 tok/s</td>
+</tr>
+<tr>
+<td>七处改动后</td>
+<td>4,698.65 ms</td>
+<td>2,464.90 tok/s</td>
+</tr>
+</tbody>
+</table>
+<p>同卡部署（单机 4 卡）：端到端从 18,619.53 ms 降到 7,957.13 ms，每卡 371 token/s，高于 PD 分离的 308 token/s。代价是每 token 时间 3.20 涨到 5.62 ms。</p>
+<h2>精度代价</h2>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>GSM8K</th>
+<th>64K 检索</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP4 基线</td>
+<td>96.50%（1,268/1,314）</td>
+<td>—</td>
+</tr>
+<tr>
+<td>最终</td>
+<td>96.42%（1,267/1,314）</td>
+<td>10/10</td>
+</tr>
+</tbody>
+</table>
+<p>GSM8K 只掉 1 道题（1,268 → 1,267），64K 检索 10/10 全对。</p>
+<h2>复现</h2>
+<p>复现从实验分支 commit b07c7011 开始（分支 SYChen123/sglang:v4.1/h20-dev-pd-blog），命令与开关对照在公众号文章复现一节列出。</p>
+<h2>公众号文章</h2>
+<p>LMSYS DeepSeek-V4.1-Flash H20:八处改动,端到端延迟降65.5%,吞吐涨2.91倍（草稿，2026-11-21 推送）
+draft.id=QAZ21DdIUv8-7B6FZA__GEHvUVVDoW83onePbv4hACO49I2qj_Sq0vCboKaYUehn</p>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
