@@ -978,6 +978,56 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">分布式训练</span><span class="tag">低带宽</span><span>收藏于 2026-11-20</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">88</span>《NVIDIA NVLinkOneSided：MoE 通信改单边直写》GB200 上跑满约 80% NVLink 带宽，NVFP4 后量化 dispatch 提速 3.06 倍</h3>
+  <p>MoE 推理里 token 的路由专家常在别的卡上，通信决定性能。NVLinkOneSided 把 AlltoAll 改成单边直写：dispatch 核只写对端对称内存，combine 核只读，接收侧不再搬运；rank-major 布局按源 rank 分槽，同一 token 每对 rank 只存一次；量化无关接口让 FP8、MXFP8、NVFP4、BF16 共用一条路。GB200 NVL72 上 ep_size=8、bsz=2048 时 dispatch 753.28 GB/s、combine 728.20 GB/s，约峰值 900 GB/s 的 80%。</p>
+  <div class="links">
+    <a class="cn" href="pages/nvlink-onesided-moe.html">中文精读 →</a>
+    <a class="en" href="https://nvidia.github.io/TensorRT-LLM/latest/blogs/tech_blog/blog18_Optimizing_MoE_Communication_with_One_Sided_AlltoAll_Over_NVLink.html">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">MoE</span><span class="tag">NVLink</span><span class="tag">GPU kernel</span><span>收藏于 2026-11-21</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">89</span>《LMSYS DeepSeek-V4.1-Flash H20：八处改动》端到端延迟降 65.5%，吞吐涨 2.91 倍</h3>
+  <p>DeepSeek-V4.1-Flash 在 8 卡 H20-3e 上用 SGLang PD 分离跑 64K 输入：七处改动后平均端到端 13.63 秒降到 4.70 秒，输出吞吐 847 涨到 2,465 token/s。Prefill 交错 CP 加 Decode DP 一步降 44.64%，FP8 DeepGEMM 打分再降 29.85%（64K 探针 1,677 万采样键值无一需截断，与 BF16 共享 99.08% top-k）；同卡部署每卡 371 token/s 高于 PD 分离的 308，GSM8K 只掉 1 道题。</p>
+  <div class="links">
+    <a class="cn" href="pages/lmsys-deepseek-v41-h20.html">中文精读 →</a>
+    <a class="en" href="https://www.lmsys.org/blog/2026-11-19-deepseek-v41-h20">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">PD 分离</span><span class="tag">低精度量化</span><span class="tag">推理优化</span><span>收藏于 2026-11-21</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">90</span>《FLAMIA：把量化器放进因果掩码》低比特注意力在 Blackwell 上快 1.42 倍</h3>
+  <p>注意力量化到低比特时，量化器先看了后面的值才决定怎么舍入前面的值，标准因果掩码管不住这条依赖。FLAMIA 把尺度几何改成文档内 32 token 块共享一个指数：前向与反向收缩复用同一套 E4M3 码，分数需要时走混合 NVFP4/FP8。默认 MXFP8 打包因果训练调用在 B200 上快 1.10–1.40 倍、B300 上快 1.06–1.42 倍；1B 预训练约 100B token，损失只涨 0.005，但 ARC Challenge 掉 3.07 个百分点。</p>
+  <div class="links">
+    <a class="cn" href="pages/flamia.html">中文精读 →</a>
+    <a class="en" href="https://www.zhongzhuzhou.org/blog/2026-11-08-flamia-technical-review-en/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">低精度量化</span><span class="tag">GPU kernel</span><span class="tag">训练框架</span><span>收藏于 2026-11-21</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">91</span>《vLLM 首日支持 Inkling 2 Mini：12 层循环跑三遍》每遍自带 KV 缓存，遍数是可调旋钮</h3>
+  <p>Thinking Machines 的循环模型：24 层分前奏 0–5、循环核 6–17、尾声 18–23，中间 12 层每 token 跑三遍、权重共享，每遍从前奏输出出发、只通过门控消息看到上一遍，每遍每核层各一套 KV 缓存与卷积状态缓存（24 层对应 48 套）。26B 总参数、3.5B 激活参数，上下文可达 1M token，自带 DSpark 推测解码。GB200 TP1、4K 上下文：1 遍 1.51 ms、352K token 容量，3 遍 3.85 ms、175K token。</p>
+  <div class="links">
+    <a class="cn" href="pages/inkling2-mini.html">中文精读 →</a>
+    <a class="en" href="https://vllm.ai/blog/2026-11-20-inkling2-mini">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">训练框架</span><span class="tag">推理优化</span><span class="tag">KV 缓存</span><span class="tag">循环模型</span><span>收藏于 2026-11-21</span></div>
+</div>
+
+<div class="card">
+  <h3><span class="n">92</span>《SGLang Radix 前缀缓存上 TPU：Qwen2.5-7B 吞吐涨 63%》混合模型上却拖后腿</h3>
+  <p>多轮 Agent 每轮重发长系统提示加不断变长的历史，服务速度取决于前缀缓存复用。SGLang radix 前缀缓存在 TPU v6e-1 上把 Qwen2.5-7B 从 930 推到 1,515 输出 token/s（c=32），TTFT p99 从 598 毫秒降到 134 毫秒，命中率 84–88%，全部请求落在 200 毫秒 SLO 内；c=96 见顶 2,755 tok/s。同一面旗子在混合线性注意力模型上反噬：Qwen3.8-27B 开缓存后每个并发都更慢。H100 快 1.65–2 倍，但 v6e-1 尾延迟 134 ms 对 410 ms。</p>
+  <div class="links">
+    <a class="cn" href="pages/sglang-radix-prefix-cache.html">中文精读 →</a>
+    <a class="en" href="https://kitrakrev.github.io/projects/sglang-tpu-agent-serving/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">TPU</span><span class="tag">并行策略（推理）</span><span>收藏于 2026-11-21</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
