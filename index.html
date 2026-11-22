@@ -1028,6 +1028,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">TPU</span><span class="tag">并行策略（推理）</span><span>收藏于 2026-11-21</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">93</span>《vstack 五阶段形式化验证：查出 SGLang 与 vLLM 的 RDMA 竞态》PdLedger 状态机兜底，开销 +0.18%</h3>
+  <p>编码 Agent 写推理引擎越来越强，但写出的引擎是否正确成了新瓶颈：vstack 用五阶段形式化验证工作流给 Agent 的产出验货，veriserve 把 PD 解耦服务的 KV 页生命周期收进 PdLedger 六态状态机。在 SGLang 与 vLLM 里查出三类真实 RDMA 竞态、提交 6 个上游修复 PR：传输仍在进行时回收传输槽位、损坏页进前缀缓存、租约不续期挂死请求。226 模块、516973 条证明义务的 TLAPS 证明背书，22104 个边界事件 100% 重放，GB200 上平均 p50 TPOT 只增加 0.18%。</p>
+  <div class="links">
+    <a class="cn" href="pages/vstack-verifiable-llm-infra.html">中文精读 →</a>
+    <a class="en" href="https://haoailab.com/blogs/verifiable-llm-infra/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">PD 解耦</span><span class="tag">形式化验证</span><span class="tag">Agent for Infra</span><span>收藏于 2026-11-22</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
