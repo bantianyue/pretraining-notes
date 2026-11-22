@@ -1048,6 +1048,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">训练框架</span><span class="tag">并行策略（训练）</span><span class="tag">GPU kernel</span><span class="tag">低精度量化</span><span>收藏于 2026-11-22</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">95</span>《SageMaker KV 感知路由：容器上报缓存状态》p50 首 token 降 97%，吞吐涨 234%</h3>
+  <p>SageMaker AI 实时端点新增 KV 感知路由：模型容器在存入或逐出 KV 缓存时上报事件，SageMaker 维护只含单向截断哈希指针的托管缓存索引；新请求按 token 做最长前缀匹配，再权衡实例负载选目标。它修的是固定字节 Prefix-aware 路由的两个误判：实例逐出缓存后路由器仍往那送，多轮对话未到 PrefixLength 时每 turn 都算新前缀。Llama 3.1 70B、7 卡 p5.48xlarge 上 p50 首 token 最多降 97%，吞吐最多涨 234%，命中率从 3–48% 升到 80–93%。</p>
+  <div class="links">
+    <a class="cn" href="pages/sagemaker-kv-aware-routing.html">中文精读 →</a>
+    <a class="en" href="https://aws.amazon.com/blogs/machine-learning/amazon-sagemaker-ai-real-time-endpoints-now-support-kv-cache-aware-routing/">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">推理优化</span><span class="tag">KV 缓存</span><span class="tag">并行策略（推理）</span><span>收藏于 2026-11-22</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
