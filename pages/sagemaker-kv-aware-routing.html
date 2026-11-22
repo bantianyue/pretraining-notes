@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SageMaker KV感知路由：容器上报缓存状态，路由按最长缓存前缀选实例 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>SageMaker KV感知路由：容器上报缓存状态，路由按最长缓存前缀选实例</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://aws.amazon.com/blogs/machine-learning/amazon-sagemaker-ai-real-time-endpoints-now-support-kv-cache-aware-routing/">https://aws.amazon.com/blogs/machine-learning/amazon-sagemaker-ai-real-time-endpoints-now-support-kv-cache-aware-routing/</a></div>
+<h1>SageMaker KV 感知路由：容器上报缓存状态，路由按最长缓存前缀选实例（中文精读）</h1>
+<ul>
+<li>原文：Amazon SageMaker AI real-time endpoints now support KV cache aware routing，Dmitry Soldatkin 等，AWS Machine Learning Blog，2026-11-17</li>
+<li>原文链接：https://aws.amazon.com/blogs/machine-learning/amazon-sagemaker-ai-real-time-endpoints-now-support-kv-cache-aware-routing/</li>
+<li>收藏日期：2026-11-22</li>
+<li>星级：4⭐</li>
+<li>主题：推理优化 / KV 缓存 / 并行策略（推理）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>SageMaker AI 实时端点新增 KV 感知路由：模型容器在存入或逐出 KV 缓存时上报事件，SageMaker 维护只含单向截断哈希指针的托管缓存索引；新请求按 token 做最长前缀匹配，再权衡实例负载选目标。它修的是固定字节 Prefix-aware 路由的两个误判：实例逐出缓存后路由器仍往那送，多轮对话未到 PrefixLength 时每 turn 都算新前缀。Llama 3.1 70B、7 卡 p5.48xlarge 上 p50 首 token 最多降 97%，吞吐最多涨 234%，命中率从 3–48% 升到 80–93%。</p>
+<h2>Prefix-aware 路由的两个盲区</h2>
+<ul>
+<li>聊天助手、RAG、带长系统提示的 Agent，每次请求都重发很长的共享上下文；Prefix-aware 路由只看请求本身：对请求开头哈希，最多取到配置的 PrefixLength 字节，把共享同一前缀的请求送到同一实例</li>
+<li>实例上的缓存会变：GPU 显存满了，容器逐出旧的 KV 缓存条目，路由器还在往那送匹配的请求；对话一开始很短，多轮里每 turn 都加历史，请求短于 PrefixLength 时，每个新 turn 都改了路由器哈希的文本，可能落到与之前不同的实例上；两个盲区都让请求重算本可复用的 KV</li>
+</ul>
+<h2>KV 感知路由怎么工作</h2>
+<ul>
+<li>三部分：模型容器上报自己缓存了什么，SageMaker 为端点维护托管缓存索引，端点在索引里查最长匹配、再权衡负载选实例</li>
+<li>打开 SM_VLLM_KV_EVENTS_CONFIG 后，容器每次存入或逐出缓存条目都发布一个 KV 缓存事件，SageMaker 用事件保持索引最新：索引里只有指针，也就是缓存内容的单向截断哈希，每个映到持有它的实例或推理组件副本；它从不存 prompt 文本、从不存 KV 张量；新实例从空缓存起步，缩容与更新后索引跟着变</li>
+<li>图 1 的端点有 A、B、C 三个实例，每台跑同一模型、各自在自己的模型容器里（AWS vLLM 深度学习容器）；对话 1 第 4 turn、6,200 token 到达时，路由器先分词、在索引里查：A 持有前 6,000 token，匹配最长，请求去 A；A 太忙时，去最不忙的实例</li>
+</ul>
+<h2>四种路由策略</h2>
+<table>
+<thead>
+<tr>
+<th>策略</th>
+<th>怎么路由</th>
+<th>适合</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RANDOM（默认）</td>
+<td>每个请求发给随机选的实例</td>
+<td>通用负载、非 LLM 模型、可互换的请求</td>
+</tr>
+<tr>
+<td>LEAST_OUTSTANDING_REQUESTS</td>
+<td>发给在途请求最少的实例</td>
+<td>处理时间不一、想让各实例同样忙的负载</td>
+</tr>
+<tr>
+<td>PREFIX_AWARE</td>
+<td>共享同一 prompt 前缀（到 PrefixLength）的请求发给同一实例；到 ConcurrencyThreshold 时溢到另一实例</td>
+<td>开头共享固定文本的 LLM 负载，任何支持前缀缓存的服务框架</td>
+</tr>
+<tr>
+<td>KV_AWARE（新）</td>
+<td>按容器上报的缓存状态，把请求发给持有匹配缓存前缀的实例，权衡匹配长度与负载；回退到负载感知路由</td>
+<td>支持的容器上的 LLM 负载：多轮对话、频繁缓存逐出、或只共享开头一部分的请求</td>
+</tr>
+</tbody>
+</table>
+<h2>Prefix-aware 还是 KV-aware</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Prefix-aware 路由</th>
+<th>KV-aware 路由</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>缓存位置来源</td>
+<td>从请求前缀推断</td>
+<td>容器上报的缓存状态</td>
+</tr>
+<tr>
+<td>每请求新增延迟</td>
+<td>第一篇里 1.3–1.9 毫秒</td>
+<td>短 prompt 几毫秒，长 prompt 更多，大多是分词时间</td>
+</tr>
+<tr>
+<td>匹配</td>
+<td>开头 PrefixLength 字节（Invoke API）或字符（OpenAI 兼容 API）</td>
+<td>按 token，最长缓存匹配</td>
+</tr>
+<tr>
+<td>参数</td>
+<td>PrefixLength、ConcurrencyThreshold</td>
+<td>不需要</td>
+</tr>
+<tr>
+<td>容器</td>
+<td>任何开前缀缓存的容器</td>
+<td>支持的容器，开前缀缓存与 KV 缓存事件</td>
+</tr>
+<tr>
+<td>请求载荷</td>
+<td>任何</td>
+<td>OpenAI 兼容 Completions 或 Chat Completions 格式</td>
+</tr>
+</tbody>
+</table>
+<h2>性能</h2>
+<ul>
+<li>两种方式测：生产规模实例上的大规模基准，和一个可复现的小规模对照</li>
+<li>基准结果：Llama 3.1 70B Instruct、7 台 ml.p5.48xlarge、30 分钟测试、20 或 100 个模拟用户、多轮对话与文档问答、prompt 最长约 64,000 token；与随机路由比、长 prompt 高负载下，KV 感知路由让 p50 首 token 最多降 97%，吞吐最多涨 234%，KV 缓存命中率从 3–48% 升到 80–93%；长 prompt 在低负载下也有收益；短 prompt 收益最小，因为可省的 prefill 少；结果取决于负载</li>
+<li>路由开销与回退：路由前，端点先对 prompt 分词、在托管缓存索引里查；短 prompt 几毫秒，长 prompt 更久，大多是分词时间，相对缓存命中省下的时间很小；标准选项的纯文本请求，分词结果直接传给模型，prompt 不会分词两次；查找慢、没有可用匹配、或匹配的实例都忙时，端点走负载感知路由（与 LEAST_OUTSTANDING_REQUESTS 同样的行为），请求照常服务，只是没有缓存收益；这些回退在发布时不上报到控制台或指标；prompt 很短时可省的 prefill 少，Prefix-aware 路由就够了</li>
+</ul>
+<h2>什么时候用 KV 感知路由</h2>
+<ul>
+<li>Prefix-aware 不用改容器，但看不见实例实际持有什么；KV 感知问容器持有什么，所以更准；当缓存上下文多、且缓存承压时最划算：长 prompt、高负载、实例 KV 缓存显存吃紧；这时容器按最近最少使用逐出缓存，包括共享 prompt 与对话历史的一部分</li>
+<li>例子：客服助手跑三台实例，每段对话开头都是同一份 6,000 token 知识库摘录；对话 1 从实例 A 开始，A 缓存了摘录；流量上升，A 显存吃紧，容器逐出摘录大半；实例 B 最近服务过同一摘录的另一段对话，还持有前 4,000 token；对话 1 的下一 turn 到达时，Prefix-aware 仍送到 A，A 重算摘录；KV 感知路由里 A 的容器已上报逐出，索引显示 B 的匹配最长，请求去 B，只重算剩下的 token；低负载时 A 不会逐出，两种策略都会送到 A、缓存完好</li>
+<li>最受益的三类请求：多轮对话（每 turn 都发完整对话历史，缓存前缀随每 turn 变长；KV 感知路由匹配整段缓存历史，让每段对话留在持有它的实例上）；高吞吐共享上下文（RAG 应用在前面贴检索文档，助手每请求都发长系统提示；prompt 长、实例承压时 KV 感知路由合适；共享内容放前面、顺序一致）；前缀长度难调的负载（Prefix-aware 要选一个 PrefixLength，盖住共享文本又不拆散该在一起的请求；KV 感知路由没有前缀长度可调，因为它按实际缓存的匹配）</li>
+<li>Prefix-aware 适合的情形：请求开头共享稳定的系统提示或文档、prompt 短、负载适中；实例显存够、共享文本一直缓存着，两种策略都找得到；容器不支持 KV 感知时也选它；请求短且可互换、或模型不是 LLM 时，缓存上下文没多少可复用，用 RANDOM 或 LEAST_OUTSTANDING_REQUESTS；拿不准时，先用 Prefix-aware，再拿自己的流量对 KV_AWARE 端点跑，对比首 token、吞吐与命中率</li>
+</ul>
+<h2>要求与限制</h2>
+<ul>
+<li>容器：发布时支持 AWS vLLM 深度学习容器：vLLM 0.33.0 及以上镜像，或 Amazon Linux 构建 server-sagemaker-cuda-v2.8.0 及以上；前缀缓存须开（默认开），KV 缓存事件须用 SM_VLLM_KV_EVENTS_CONFIG 环境变量打开；SageMaker 不替你设</li>
+<li>端点与实例：实时单模型端点与推理组件端点，包括动态 LoRA 适配器，GPU 实例类型；也可用 CloudFormation 配置；单模型端点至少两个实例、或推理组件至少两个副本（可在同一实例上）时路由才生效；更少时也可设 KV_AWARE，端点不拒绝，但请求全去唯一的实例或副本</li>
+<li>请求：OpenAI 兼容的 Completions 或 Chat Completions 载荷，经 InvokeEndpoint、InvokeEndpointWithResponseStream 或 SageMaker OpenAI 兼容 Chat Completions API 发送；InvokeEndpointWithBidirectionalStream 不支持；model 字段须与 SM_VLLM_MODEL 一致；详细可观测性（跟踪 KV 缓存命中率）需要 AWS CLI 2.35.6 及以上或 Boto3 1.43.31 及以上；SageMaker 在端点服务流量前检查这些要求，检查失败时请求或部署会带着缺失说明失败</li>
+</ul>
+<h2>怎么打开</h2>
+<ul>
+<li>两处：模型与端点配置；示例 notebook 全程跑完这两步，单模型端点与推理组件端点都覆盖</li>
+<li>在模型里打开 KV 缓存事件：创建模型时把 SM_VLLM_KV_EVENTS_CONFIG 加进容器环境；没有它，端点没有缓存状态可路由；设置里的端口只在实例内部用，不用向网络开放</li>
+<li>在端点配置里选 KV 感知路由：生产变体的 RoutingConfig 里把 RoutingStrategy 设为 KV_AWARE</li>
+<li>容器镜像为 CUDA 13 构建时，生产变体里还要设 InferenceAmiVersion，指向支持它的 AMI，如 al2023-ami-sagemaker-inference-gpu-4-1，否则容器可能启动失败；先确认账户的端点配额够不够用，不够去 Service Quotas 申请；同一 RoutingConfig 设置也适用于推理组件端点，包括动态 LoRA 适配器；对适配器，KV 感知路由在已加载该适配器的实例里选</li>
+</ul>
+<h2>怎么调用端点</h2>
+<ul>
+<li>调用方式不变：用 InvokeEndpoint 发 Chat Completions 载荷，或 InvokeEndpointWithResponseStream 加 "stream": true；也可用 OpenAI Python 客户端经 SageMaker OpenAI 兼容 Chat Completions API 调用</li>
+<li>KV 感知路由不适用第一篇的多租户前缀隔离：忽略 prefix-aware ID 头与 prompt_cache_key 字段；顶层 cache_salt 字段非空时请求被 400 拒绝；新增两个错误情形：model 字段指向容器不服务的模型时报 ModelError；cache_salt 非空时 400；推理本身的错误照常返回；端点不把 KV 感知路由决策日志送到你的账户，用验证一节的检查（如每请求 cached_tokens 与 KV 缓存命中率）看路由行为</li>
+</ul>
+<h2>验证 KV 感知路由在工作</h2>
+<ul>
+<li>KV 感知路由不新增自己的指标，从模型效果上查：三种办法</li>
+<li>每请求查缓存命中数：容器默认不报 prompt token 细节，模型环境里把 SM_VLLM_ENABLE_PROMPT_TOKENS_DETAILS 设为 true；每条响应随后带 usage.prompt_tokens_details.cached_tokens，即由 KV 缓存提供的 prompt token 数；发后续 turn、或另一条开头相同的请求时，非零值说明请求到了持有其前缀的实例</li>
+<li>CloudWatch 查模型指标：创建端点配置时加 --metrics-config '{"EnableDetailedObservability": true}' 打开详细可观测性；SageMaker 随后发布模型容器指标，包括 KV 缓存命中率与 TTFT；按详细可观测性文档用 PromQL 查</li>
+<li>与备选策略对照：多数 LLM 负载的真实选择在 KV_AWARE 与 PREFIX_AWARE 之间，所以比这两者，再加一个 RANDOM 端点做基线；每个端点用同一模型、实例类型与实例数，同一 prompt、同一并发、同一时长发，唯一差别是路由策略；测试要像生产流量一样复用上下文；KV_AWARE 与 PREFIX_AWARE 表现差不多时，Prefix-aware 是更简单的选择</li>
+</ul>
+<h2>对照结果</h2>
+<ul>
+<li>对照例子：RANDOM 与 KV_AWARE 在小端点上比；同一多轮负载发给仅路由策略不同的两个端点；每端点两台 ml.g5.xlarge，跑 Qwen3-4B-Instruct-2507；每轮 128 个请求：32 个模拟用户，每人问 4 个问题，文档取自 12 篇约 7,400 token 的文档；每问重发至今的对话，后续问题可复用缓存上下文；跑两对，pair 1 先 RANDOM、pair 2 先 KV_AWARE，每对用新文档、两端点都从空缓存起步</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>RANDOM</th>
+<th>KV_AWARE</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CloudWatch ModelLatency 平均值（毫秒）</td>
+<td>4,124 / 5,100</td>
+<td>1,235 / 1,314</td>
+</tr>
+<tr>
+<td>CloudWatch ModelLatency p50（毫秒）</td>
+<td>3,153 / 4,083</td>
+<td>656 / 700</td>
+</tr>
+<tr>
+<td>CloudWatch ModelLatency p90（毫秒）</td>
+<td>8,334 / 10,746</td>
+<td>3,213 / 3,535</td>
+</tr>
+<tr>
+<td>CloudWatch ModelLatency p99（毫秒）</td>
+<td>17,779 / 16,249</td>
+<td>6,876 / 7,238</td>
+</tr>
+<tr>
+<td>首 token p50，问题 2–4（毫秒）</td>
+<td>1,284 / 1,632</td>
+<td>237 / 245</td>
+</tr>
+<tr>
+<td>首 token p90，问题 2–4（毫秒）</td>
+<td>5,039 / 6,101</td>
+<td>456 / 367</td>
+</tr>
+<tr>
+<td>首 token p90，全部请求（毫秒）</td>
+<td>5,003 / 5,683</td>
+<td>1,465 / 1,759</td>
+</tr>
+<tr>
+<td>由缓存提供的 prompt token 占比</td>
+<td>0.761 / 0.701</td>
+<td>0.903 / 0.903</td>
+</tr>
+<tr>
+<td>运行用时（秒）</td>
+<td>31.1 / 36.9</td>
+<td>17.9 / 18.0</td>
+</tr>
+<tr>
+<td>CloudWatch OverheadLatency 平均值（毫秒）</td>
+<td>13.1 / 8.1</td>
+<td>27.1 / 27.5</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>两对里 KV_AWARE 的 CloudWatch ModelLatency 平均值都更低（1,235 与 1,314 毫秒，对 4,124 与 5,100 毫秒），问题 2–4 的首 token p50 也更低（237 与 245 毫秒，对 1,284 与 1,632 毫秒）；缓存占比更高，两对都是 90%，对 76% 与 70%；OverheadLatency（SageMaker 在模型容器之外花的时间）平均高 14 到 19 毫秒；这是一个模型、一种实例类型、一种长共享文档负载；图 3 是 SageMaker 控制台显示的两个端点的模型延迟图：RANDOM 平均模型延迟 4.9–6.2 秒，KV_AWARE 1.2–1.3 秒</li>
+<li>如果哪个都不比 RANDOM 好，检查容器里前缀缓存与 KV 缓存事件是否打开；示例 notebook 把这些步骤用到 Qwen3-4B-Instruct-2507、两台 ml.g5.xlarge 上，单模型端点与双副本推理组件端点都跑，两种 API 都调，容器日志里能看到后续请求由 KV 缓存提供；它不比较路由策略</li>
+</ul>
+<h2>上线后保持有效的三条做法</h2>
+<ul>
+<li>监控 KV 缓存命中率：上线后保持详细可观测性开启，在 Insights 仪表板（图 2b）或 PromQL 里看命中率随时间变化</li>
+<li>为冷启动做计划：带新上下文的第一请求（新文档、对话第一 turn）在任何实例上都没有缓存；KV 感知路由加速的是后面的请求，不是第一个</li>
+<li>为扩缩容与更新时的缓存重建做计划：新实例从空缓存起步；单模型端点用滚动或蓝绿更新、推理组件用 RollingUpdatePolicy，缓和延迟上升</li>
+</ul>
+<h2>判断</h2>
+<ul>
+<li>KV 感知路由给 SageMaker AI 实时端点第二种把请求送到缓存所在处的办法：用模型容器上报的缓存状态，实例在显存压力下逐出缓存时路由跟着走；第一篇的 Prefix-aware 路由仍是更简单的选择，适合稳定的共享 prompt、短上下文与中等负载；两种策略的路由都在端点内部由 SageMaker 处理，不用自己建路由层；打开它只要模型里一个环境变量加端点配置里 "RoutingStrategy": "KV_AWARE"</li>
+<li>今天起在所有支持 SageMaker AI 实时推理的商用 AWS 区域可用，支持的容器都可用，不另收费；SageMaker 替你运行并管理缓存索引，只按端点实例付费；KV_AWARE 是现有 RoutingStrategy 字段的新取值，不用新配置对象，旧版 AWS CLI 与 Boto3 也接受</li>
+<li>与 Valkey 分布式 KV 缓存篇（同日素材池）互补：那篇讲跨实例共享的 L2 KV 层，这篇讲端点内按缓存状态路由；两篇合起来是"缓存放哪 + 请求去哪"的完整拼图</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
