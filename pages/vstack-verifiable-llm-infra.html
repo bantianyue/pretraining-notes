@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vstack：五阶段形式化验证给推理引擎验货，PdLedger 六态 KV 页状态机兜底 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>vstack：五阶段形式化验证给推理引擎验货，PdLedger 六态 KV 页状态机兜底</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://haoailab.com/blogs/verifiable-llm-infra/">https://haoailab.com/blogs/verifiable-llm-infra/</a></div>
+<h1>vstack：五阶段形式化验证给推理引擎验货，PdLedger 六态 KV 页状态机兜底（中文精读）</h1>
+<ul>
+<li>原文：Towards Verifiable LLM Infra，Hao AI Lab，2026-11-10</li>
+<li>原文链接：https://haoailab.com/blogs/verifiable-llm-infra/</li>
+<li>收藏日期：2026-11-22</li>
+<li>星级：4⭐</li>
+<li>主题：推理优化 / PD 解耦 / 形式化验证 / Agent for Infra</li>
+</ul>
+<h2>一句话要点</h2>
+<p>编码 Agent 写推理引擎越来越强，但写出的引擎是否正确成了新瓶颈：vstack 用五阶段形式化验证工作流给 Agent 的产出验货，veriserve 把 PD 解耦服务的 KV 页生命周期收进 PdLedger 六态状态机；在 SGLang 与 vLLM 里查出三类真实 RDMA 竞态、提交 6 个上游修复 PR，226 模块 TLAPS 证明背书，GB200 上平均 p50 TPOT 只增加 0.18%。</p>
+<h2>为什么推理引擎需要可验证的服务</h2>
+<ul>
+<li>过去三年，vLLM、SGLang 从单节点执行器演变成异步分布式系统：分页 KV 内存、共享前缀缓存、PD 解耦的 RDMA 传输，全叠在同一池物理 GPU KV 页之上</li>
+<li>请求超时或中止时，清理工作同时在 RDMA 网卡、CPU 缓存树与 GPU 注意力内核之间竞态；GPUDirect RDMA 不经过目标 CPU 直接写 GPU 内存，生命周期错配时服务器不崩溃，而是照常返回 HTTP 200，同时悄悄把一个用户的 KV 缓存混进另一个用户的响应</li>
+<li>LMSYS 与 Cloudflare 近期的生产披露记录了这类风险：跨节点 RDMA 中止竞态，以及一个被拒绝请求的 KV 交接缺陷，波及 155 个用户响应</li>
+<li>在真实硬件上抓静默并发缺陷又慢又贵：标准 CI 只在单机跑、只覆盖已知路径；复现一次 RDMA 生命周期竞态需要 H100/GB200 多 GPU RDMA 硬件、独立的 Prefill 与 Decode 实例、精确的跨 worker 时序；长时间压测烧稀缺算力，也无法保证翻出所有竞态</li>
+<li>形式化验证的办法：把系统建模成状态机，用 TLA+ 模型检查结合 Z3 与 TLAPS 定理证明器，在 CPU 上穷举数百万种异步调度、证明安全不变量</li>
+<li>过去不实用的原因：引擎每天合入新 PR，手写并维护形式化规约与证明要花数月人力；今天编码 Agent 能读大型系统代码库、快速生成数千行规约与证明，这条路走得通了</li>
+</ul>
+<h2>五阶段验证工作流：把规约钉死</h2>
+<ul>
+<li>两个直接挑战：第一，写出准确的规约（软件在任何异步调度下都绝不能违反的需求）；第二，直接让编码 Agent 写模型并证明行不通，模型检查器报出竞态后，Agent 常常钻验证器的空子</li>
+<li>常见的钻空子做法：弱化不变量、从模型里删掉超时分支、加不切实际的 ASSUME 语句，让检查器返回 0 个错误</li>
+<li>vstack 作为 Claude Code 与 Cursor 的开源插件，强制执行五阶段工作流：</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>做什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. 规约</td>
+<td>把软件需求编码成形式化安全不变量，对规约文件做哈希锁定，未经批准的证明目标修改会被检测并拒绝</td>
+</tr>
+<tr>
+<td>2. 抽象</td>
+<td>构建 TLA+ 与 Z3 模型，每个状态转移精确映射到生产代码里的 file:line@commit，把非原子的跨线程与跨节点操作拆成独立步骤</td>
+</tr>
+<tr>
+<td>3. 验证模型保真度</td>
+<td>历史缺陷代码必须在模型上失败，修复后的代码必须通过，从修复里去掉一个守卫后必须在非冗余变异检查下再次失败，录制的执行轨迹必须能干净地在模型里重放</td>
+</tr>
+<tr>
+<td>4. 验证</td>
+<td>先跑 TLC 广度优先搜索找最短反例轨迹，再用 Apalache、Z3 与 TLAPS 证明状态机与 GPU KV 缓冲区地址算术在显式配置假设下成立</td>
+</tr>
+<tr>
+<td>5. 持续检查</td>
+<td>在 CPU 上对每个新 PR 重跑规约套件，把已证明的前置条件以轻量运行时检查映射回引擎</td>
+</tr>
+</tbody>
+</table>
+<h2>案例：PD 解耦服务的四条规约</h2>
+<ul>
+<li>原型：Prefill 节点算出提示的 KV 缓存，通过单边 RDMA 传给 Decode 节点，Decode 节点共享缓存前缀并运行 Decode 注意力内核</li>
+<li>四条规约：隔离性（在途传输或旧请求的迟到消息绝不能读或覆盖新请求的内存与状态）、完整性（Decode 内核读到的每个 KV 页、发布进全局前缀缓存的每个 KV 页，都必须包含来自目标请求生成的完整未损坏数据）、终结性（每个活跃请求与正在排空的内存页必须在有限步内到达终止状态）、守恒性（每个物理页严格记账，暴露给在途 RDMA 的页只有收到硬件停止证据后才能回 FREE，否则永久隔离在 QUARANTINED）</li>
+</ul>
+<h2>三类真实竞态</h2>
+<ul>
+<li><strong>传输仍在进行时回收传输槽位或 KV 块</strong>：请求中止或超时后，已排进网卡的单边 RDMA 传输在所研究的传输路径上无法从硬件取消；但两个引擎都允许新请求复用同一个传输标识，或在硬件传输停止前就重新分配已过期的 GPU 页，违反隔离性；GB200 上复现，迟到的 RDMA 访问在 HTTP 200 之下悄悄读或覆盖另一个请求的 KV 缓存</li>
+<li><strong>把竞态损坏的 KV 页发布进全局前缀缓存</strong>：RDMA 传输完成后，Decode 节点可能在不检查该页生命周期代际是否在传输中途失效的情况下，就把收到的 KV 页插进全局前缀缓存，违反完整性；vLLM 的 GB200 实验里，损坏页污染了后续复用该缓存前缀的请求</li>
+<li><strong>传输租约不续期，Decode 请求挂死</strong>：远端传输停滞或中止通知丢失时，不续期的租约与缺失的看门狗让 Decode 请求无限期等待，同时一直占着已分配的 GPU 页，违反终结性与守恒性</li>
+<li>6 个上游修复 PR 已提交（SGLang 5 个、vLLM 1 个，另有 1 个 vLLM 拉取验证相关 PR）</li>
+<li>本地超时为什么失效（形式化证明）：在无界异步延迟、没有可信停止或撤销证据、本地历史无法区分的情况下，任何只靠本地的页回收策略都不可能同时保证早回收时的隔离性与一直持有页时的页级终结性回收</li>
+</ul>
+<h2>veriserve 与 PdLedger</h2>
+<ul>
+<li>核心是单一权能状态机 PdLedger：用带版本的票据 (page, gen) 跟踪每个物理页，走过六个显式实现状态：FREE、PRIVATE、SHARED、DRAINING、QUARANTINED、DUP</li>
+<li>关键改动：用 DRAINING 与 QUARANTINED 把请求取消与硬件 DMA 完成解耦</li>
+<li>有停止证据时释放，回 FREE：释放仍有在途 RDMA 或内核访问的私有页时，先移到 DRAINING；硬件完成或对端确认全部被跟踪的访问都已停止后，送回 FREE，同时每个新请求化身拿到新的代际标识 gen</li>
+<li>无停止证据时超时，进 QUARANTINED：终结受影响的等待请求、避免挂死，同时把暴露的物理页在进程生命周期内永久隔离，迟到的 RDMA 包只能落在 FREE 与前缀缓存之外</li>
+<li>形式化证明只保证抽象设计模型在其显式假设下安全，不保证 Python 实现、GPU 内核或 RDMA 供应商没有缺陷；veriserve 在运行时同步检查 PdLedger 前置条件，在变异门里拒绝注入的状态转移变异，并记录 Prefill 与 Decode 边界转移，供 TLC 逐步做轨迹验证</li>
+</ul>
+<h2>关键数字</h2>
+<ul>
+<li>226 模块、516973 条证明义务的 TLAPS 归纳证明，覆盖全部 64 个协议动作与 54 条归纳不变量；TLC 模型检查探索 2100 万以上可达状态，零安全违规</li>
+<li>22104 个边界事件 100% 在 TLC 里干净重放（8 次正常服务运行）</li>
+<li>540 个 KV 校验和零失配、零账本违规；运行时检查抓住全部 3 个注入的胶水层故障</li>
+<li>GB200 上平均 p50 TPOT 开销 +0.18%（95% 置信区间 -0.32% 至 +0.68%）；Decode 侧 PdLedger 检查在 p50 下每步占 0.33 毫秒 CPU 时间，对照 13.6 毫秒的中位 HTTP TPOT</li>
+<li>评测配置：4 卡 GB200 节点，Qwen3-0.6B 与 Qwen3-32B，Prefill 与 Decode 实例各占一块卡、走 Mooncake 互联，负载为阿里 qwen-bailian</li>
+</ul>
+<h2>开源与下一步</h2>
+<ul>
+<li>三部分全部开源：vstack 插件、veriserve 引擎（含 PdLedger、TLA+/TLAPS/Z3 模型和证明、轨迹验证套件）、SGLang 与 vLLM 的上游修复</li>
+<li>下一步：SGLang HiCache 这类分层 KV 缓存、多页前缀树与底层 GPU 内核的形式化验证</li>
+<li>判断：Agent 写基础设施的速度还在加快，能跟上它的验证手段，决定了这些代码能不能进生产系统；这篇把“验证”从流程口号变成了可跑的工作流加可证明的状态机，是 Agent for Infra 这条线上的关键拼图</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
