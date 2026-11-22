@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ElastiCache for Valkey 分布式 KV 缓存：L2 共享层让成本降 40%、首 token 快 80% · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>ElastiCache for Valkey 分布式 KV 缓存：L2 共享层让成本降 40%、首 token 快 80%</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://aws.amazon.com/blogs/database/announcing-distributed-kv-caching-for-self-hosted-llms-with-amazon-elasticache/">https://aws.amazon.com/blogs/database/announcing-distributed-kv-caching-for-self-hosted-llms-with-amazon-elasticache/</a></div>
+<h1>ElastiCache for Valkey 分布式 KV 缓存：全舰队共享 L2 层，成本降 40%、首 token 快 80%（中文精读）</h1>
+<ul>
+<li>原文：Announcing distributed KV caching for self-hosted LLMs with Amazon ElastiCache，Meet Bhagdev、Chaitanya Nuthalapati、Kevin McGehee，AWS Database Blog，2026-11-18</li>
+<li>原文链接：https://aws.amazon.com/blogs/database/announcing-distributed-kv-caching-for-self-hosted-llms-with-amazon-elasticache/</li>
+<li>收藏日期：2026-11-22</li>
+<li>星级：4⭐</li>
+<li>主题：推理优化 / KV 缓存 / 并行策略（推理）</li>
+</ul>
+<h2>一句话要点</h2>
+<p>Amazon ElastiCache for Valkey 的分布式 KV 缓存正式可用：把自托管大模型推理的 KV 缓存做成全舰队共享的 L2 层。AWS 的数字：成本降最多 40%，首 token 时间（TTFT）降最多 80%。L0 在 GPU 显存里、L1 在本机内存与 NVMe 里，请求一换服务器、会话一隔夜、节点一故障，缓存就丢了，prompt 得重算；分布式 L2 层让舰队里任何一台 GPU 都能读到同一份已算好的 KV。</p>
+<h2>自托管推理的算力瓶颈在 prefill</h2>
+<ul>
+<li>大模型每生成一个 token，都依赖前面所有 token 算出的 key 与 value 张量，即 KV 状态。引擎把这些张量存在 KV 缓存里，像书里已读章节的笔记：有笔记就不用重读章节</li>
+<li>推理分两阶段。Prefill 阶段并行读 prompt、为每个输入 token 算 KV 状态，是算力 bound，随 prompt 长度平方增长，因为每个 token 都要 attend 前面所有 token。Decode 阶段一次生成一个 token，每步读不断变大的 KV 缓存，是显存带宽 bound</li>
+<li>TTFT 主要反映 prefill 延迟，随 prompt 长度陡增。B300 上的测试：32K token 的 prompt 要几秒 prefill，100K token 要几十秒，超过 250K token 的上下文要几分钟。AI 编码助手、客服助手、文档问答管线常把 prompt 推过 100K token，且每 turn 大多重复。没有缓存的 KV 状态，引擎为一条短新消息重算整个 prefill，包括系统提示、工具定义与全部历史消息。SemiAnalysis 与 TraceLab 的编码助手 trace 显示，超过 95% 的 prompt token 属于已处理过的前缀。重复 prefill 会吃掉本可服务新请求的 GPU 时间</li>
+</ul>
+<h2>L0 与 L1 为什么不够用</h2>
+<ul>
+<li>KV 缓存省的是 prefill 重算：缓存住的前缀跳过平方级计算，引擎只 prefill 新增 token。推理引擎常把 KV 状态存在两处。第一处是 GPU 显存，即 L0 缓存。当今 GPU 上最多 288 GB HBM3e，由模型权重与所有在途请求共享。L0 最快，也最小，引擎为腾地方逐出旧块，长对话很快老化。第二处是主机内存与本地 NVMe，经 LMCache 这类 offload 库到达，即 L1 缓存。L1 比 L0 大、离 GPU 也够近，但它属于单台服务器，还要与服务器上其他部分抢内存；请求落到另一台服务器就完全命中不了</li>
+<li>这两层本地缓存适合待在一台服务器上的短会话，三种常见模式下会失效：</li>
+<li><strong>长时间运行或回访的会话</strong>：用户隔几小时、几天回来，L0 与 L1 都已掉出，因为这两层小、存留时间短。编码助手、客服助手、法律 AI 助手里常见，prompt 缓存只撑几分钟</li>
+<li><strong>跨舰队的路由变化</strong>：请求落到与之前处理 prompt 不同的 GPU 服务器，本地层全部 miss。流量高峰逼着用户在“在有缓存状态的 GPU 上排长队”与“在别的 GPU 上花钱重算”之间选</li>
+<li><strong>服务器故障</strong>：主机故障与缩容事件可能把本地缓存整个清空。舰队仍可用，但 prompt 要重算，延迟上升</li>
+<li>分布式 KV 缓存补上这两层，做全舰队 GPU 共享的 L2 层。每个请求先按顺序查本地层，miss 才读 L2；写新 KV 状态时，推理引擎的连接器把它写进 L2，舰队里任何 GPU 下次 miss 时都能复用</li>
+<li>图 1 的流程：prompt token 先查 L0（GPU HBM）与 L1（主机 DRAM 与本地 NVMe），两层都 miss 才从 L2 取；命中后把 KV 状态提升回 L0/L1。L2 就是底部的 ElastiCache for Valkey 分布式缓存</li>
+</ul>
+<h2>分布式 KV 缓存：ElastiCache for Valkey</h2>
+<ul>
+<li>分布式 KV 缓存是 ElastiCache for Valkey 的新能力，面向自托管大模型推理。<strong>数据分层</strong>：ElastiCache for Valkey 把最热的 KV 块放 DRAM、较冷的块自动分层到节点的本地 NVMe；<strong>EFA 上的 RDMA</strong>：用 AWS Elastic Fabric Adapter（EFA）做 RDMA，读写大对象做到毫秒级延迟</li>
+<li>它提供 PB 级可扩展存储，同一可用区里的每台 GPU 都读同一份 L2 缓存。请求落到任何一台服务器，都能读到之前的上下文。某台 GPU 主机故障，存活的服务器继续服务，还能读故障主机写过的 KV 状态，只要缓存还没逐出它。流量高峰逼出新服务器入轮换，它直接从 L2 读缓存的 KV 状态，不用冷启动</li>
+</ul>
+<h2>取数延迟：表 1</h2>
+<ul>
+<li>分布式 KV 缓存从内存里取一个多 MB 的缓存对象不到 1 毫秒，取多 GB 的 KV 状态只需几毫秒。表 1 是用 cache.i8ge.48xlarge 节点（发布时支持最高 220 Gbps）取、存 1 GB 数据的延迟</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>对象数</th>
+<th>缓存操作</th>
+<th>延迟（P50）</th>
+<th>延迟（P99）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>一个 8 MB 对象</td>
+<td>Get</td>
+<td>477 微秒</td>
+<td>950 微秒</td>
+</tr>
+<tr>
+<td>一个 8 MB 对象</td>
+<td>Set</td>
+<td>881 微秒</td>
+<td>1,010 微秒</td>
+</tr>
+<tr>
+<td>1 GB（8 MB 对象 × 128，单节点）</td>
+<td>Get</td>
+<td>41.7 毫秒</td>
+<td>42.1 毫秒</td>
+</tr>
+<tr>
+<td>1 GB（8 MB 对象 × 128，单节点）</td>
+<td>Set</td>
+<td>44.6 毫秒</td>
+<td>49.4 毫秒</td>
+</tr>
+</tbody>
+</table>
+<h2>基准怎么测</h2>
+<ul>
+<li>成本与 TTFT 的降幅取决于负载特征与缓存命中率。AWS 测了三类常见负载：编码助手（SemiAnalysis Claude Code trace）、AI 助手（哈佛 FreeInference agentic trace，不含 Claude Code 与 SWE-bench）、长上下文问答（LooGLE 与 L-Eval）；测了 2026 年的 5 个不同大模型，稀疏注意力与混合注意力，250B 到 1.6T 参数</li>
+<li>推理负载的收益测试用 2 到 6 台 P6 服务器、每台 8 张 GPU，跑 vLLM。全部基线用 GPU 本地 KV 缓存，约 150 GB L0 与 205 GB L1；对照组在同一可用区加一个 cache.i8ge.48xlarge 节点，用 LMCache Valkey 连接器</li>
+</ul>
+<h2>实测收益</h2>
+<ul>
+<li>长上下文问答：GPU 从缓存取 token 而不是重做 prefill，就能服务更多 prompt、压低 TTFT。共享文档问答负载上，每台服务器加了 ElastiCache 后每秒请求数翻倍，同时保持交互性。交互性 SLO 定义为 p90 TTFT 小于 5 秒、p90 每个输出 token 时间小于 50 毫秒。请求翻倍后，每百万输出 token 的成本降 40%，已扣掉 ElastiCache 节点的费用。同样负载下，跨 GPU 的共享缓存还降低了 TTFT 与每个输出 token 的时间，答案开始得更早、流式输出更顺滑</li>
+<li>编码助手与 AI 助手：编码助手与 AI 助手负载用 SemiAnalysis AgentX 方法测。两类负载上，每台 GPU 服务器的每秒 token 峰值（token 吞吐）都涨 23%</li>
+<li>服务器故障与扩容：共享缓存下，系统在 GPU 服务器故障时表现更好：重启的服务器从缓存里补水，系统更快恢复</li>
+<li>首 token 降幅 55% 到 93%，切分点全在 10K token 之内：缓存命中省的是 GPU 的 prefill 工作，TTFT 跟着降。8 个模型、两种负载的测试里，TTFT 降幅在 55% 到 93% 之间。每个模型都有一个切分点：prompt 长度超过它，从缓存取就比重算快。测试里的每个模型切分点都在 10K token 之下：稀疏模型不到 512 token，混合模型在 1,000 到 7,600 token 之间。只想改善延迟时，先找到自己负载配置的切分点，只缓存超过它的 prompt</li>
+</ul>
+<h2>Multiverse Computing 的实测</h2>
+<ul>
+<li>Multiverse Computing 跑了 ElastiCache for Valkey 的分布式 KV 缓存，分享了结果。Ennio Pastore（Multiverse Computing AI 平台总监）说：公司帮客户用压缩模型扩展推理规模、降成本与延迟；加上 ElastiCache for Valkey 的分布式 KV 缓存后，在现有 GPU 上服务了更多 prompt，成本与延迟又降一截；在 1 秒中位首 token 目标内，同一批 GPU 多处理了 50% 的请求；正常流量下中位首 token 时间降 23%，高峰流量下降 95%</li>
+</ul>
+<h2>哪些负载最受益</h2>
+<ul>
+<li>分布式 KV 缓存的收益最大，落在两类模式上：</li>
+<li><strong>长输入 prompt、回访或共享的会话</strong>：多 turn 在同一代码库里工作的 AI 编码助手；保留几小时、几天对话历史的客服助手；多用户就同一批合同、手册提问的文档问答</li>
+<li><strong>流量铺在多台 GPU 服务器上、到达忽高忽低或路由变化</strong>：跨客户服务开源权重模型的推理供应商；共享系统提示加用户专属尾巴的零售、广告负载</li>
+<li>三类负载收益小：KV 状态能舒服装进 GPU 显存的小规模部署；单次 LLM 调用、无复用的负载（分类、翻译、内容审核）；短 prompt 生成长输出的应用</li>
+</ul>
+<h2>上线前先算账：KVTrace</h2>
+<ul>
+<li>部署前可用开源 KVTrace 工具估算自己负载的成本节省与 TTFT 改善，不另收费。KVTrace 用 vLLM 与 SGLang 已发布的缓存事件，报告分布式 KV 缓存本可服务的漏失重算，给出预期缓存命中率、成本降幅、TTFT 降幅与建议的集群规模。它用应用流量的到达时间与 KV 大小，离线模拟不同 L2 缓存大小下的收益。在生产集群上跑估算也安全：不用改推理引擎或 GPU 集群，只用哈希过的 prompt 数据，保护 prompt 数据隐私</li>
+<li>用 KVTrace 配 vLLM 的步骤：从 GitHub 取 KVTrace（不在 PyPI 上），装好后打开 vLLM 的 KV 缓存事件，在舰队每台 GPU 服务器上录流量，把各服务器的 traces/ 汇总到一处，再模拟缓存大小、写报告</li>
+</ul>
+<h2>判断</h2>
+<ul>
+<li>ElastiCache for Valkey 的分布式 KV 缓存把自托管大模型推理的成本降最多 40%、首 token 时间降最多 80%。它不是替代 L0 与 L1，而是给全舰队加一层共享 L2：请求先查本地层，miss 才读 L2；新 KV 状态写进 L2，任何 GPU 下次都能复用。PB 级存储、DRAM 热层加 NVMe 冷层、EFA 上的 RDMA，让多 GB 的 KV 状态几毫秒可取</li>
+<li>与同日 SageMaker KV 感知路由篇互补：那篇讲端点内按缓存状态路由（请求去哪），这篇讲跨实例共享的 L2 KV 层（缓存放哪）；两篇合起来是“缓存放哪 + 请求去哪”的完整拼图</li>
+<li>部署前先用 KVTrace 在自己的流量上算一遍：命中率、降幅与集群规模都有数，再建集群。上手办法：在 GPU 舰队所在的可用区里，用 AWS CLI 建一个 ElastiCache for Valkey 集群，把端点加进推理引擎</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
