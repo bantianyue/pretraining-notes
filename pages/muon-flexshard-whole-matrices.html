@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muon与FlexShard：优化器要整块矩阵，FSDP的切片给不出 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Muon与FlexShard：优化器要整块矩阵，FSDP的切片给不出</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://vlasenkoalexey.github.io/2026/11/muon-flexshard-whole-matrices/">https://vlasenkoalexey.github.io/2026/11/muon-flexshard-whole-matrices/</a></div>
+<h1>Muon 与 FlexShard：优化器要整块矩阵，FSDP 的切片给不出（中文精读）</h1>
+<ul>
+<li>原文：Muon and FlexShard: why the optimizer needs whole matrices，Aleksey Vlasenko，2026-11-02（2026-11-13 更新）</li>
+<li>原文链接：https://vlasenkoalexey.github.io/2026/11/muon-flexshard-whole-matrices/</li>
+<li>收藏日期：2026-11-22</li>
+<li>星级：4⭐</li>
+<li>主题：训练框架 / 并行策略（训练）/ GPU kernel / 低精度量化</li>
+</ul>
+<h2>一句话要点</h2>
+<p>AdamW 是逐元素的优化器，在权重矩阵的任意一片上跑与在整块上跑结果相同；Muon 把权重当整块矩阵做正交化，每一步都要整块矩阵，FSDP 给每个 GPU 的切片算出的更新是错的。FlexShard 把权重存在哪与数学在哪算分开：v1 在 torchtitan 里让矩阵在优化器步时临时归到一个主人，v2 在独立库里直接把矩阵整个存在主人那里；DeepSeek V3 671B、256 张 H100 上最慢 GPU 的优化器步从 527 毫秒降到 301 毫秒。</p>
+<h2>一个实验看清全部问题</h2>
+<ul>
+<li>取一块权重矩阵，先在整块上跑优化器，只看头四行；再只在头四行上跑同一优化器</li>
+<li>AdamW 两次给出的更新完全相同；Muon 两次给出的更新最大差到 0.19，数值本身最大不过 0.46</li>
+<li>Muon 是 Kimi K2 与 DeepSeek V4 背后的优化器，它与今天分片模型的方式合不上</li>
+</ul>
+<h2>AdamW 是逐元素的</h2>
+<ul>
+<li>AdamW 给每个权重存两个滑动平均：梯度的均值 m，与梯度平方的均值 v；更新用 m 除以 v 的平方根，每个权重步长差不多大，再配与旧权重成正比的解耦权重衰减</li>
+<li>每个权重只用自己的梯度与自己的两个统计量，别的什么都不用；这个性质叫逐元素</li>
+</ul>
+<h2>FSDP 的一个训练步</h2>
+<ul>
+<li>普通数据并行里每个 GPU 都存一份完整模型，各自在自己那份批次上训练；FSDP 保留数据并行，把模型切开，每块 GPU 只存每份权重的四分之一</li>
+<li>一个训练步分四步：前向之前 all-gather（每块 GPU 把自己的四分之一发给所有其他 GPU，一瞬间每块都持有完整权重，前向跑完副本释放）；反向再 all-gather 一次（产生每块 GPU 上一份完整尺寸的梯度）；reduce-scatter（梯度的每个四分之一被送到拥有它的 GPU，路上求和）；优化器步（什么都不动，每块 GPU 在自己的四分之一上跑 AdamW）</li>
+<li>第四步能成立，全靠 AdamW 是逐元素的：切片算出的答案与整块完全一样；一个参数桶三轮集合通信，优化器步里一轮都不用</li>
+</ul>
+<h2>Muon 三步</h2>
+<ul>
+<li>Muon 故意打破逐元素假设：线性层是一个映射 y=Wx，Muon 把每个隐藏层权重当成矩阵，让更新沿每个方向推得一样多</li>
+<li>第一步动量：与带动量的 SGD 一样，给每个权重矩阵存一个梯度的滑动平均；这一步取滑动平均，再往新鲜梯度的方向推一把（Nesterov 动量）；没有第二矩，AdamW 每个权重存两个状态缓冲，Muon 只存一个</li>
+<li>第二步正交化：任意矩阵都能写成 U S Vᵀ（旋转、拉伸、再旋转）；动量矩阵是偏的，少数几个方向占主导，很多有用的方向几乎无声；Muon 保留旋转 U 与 V，扔掉强度，每个奇异值都变成 1，椭圆变成圆，更新 U Vᵀ 沿着与动量相同的轴、每个方向移动相同的量；AdamW 按每个数字自己的尺度归一化，Muon 按每个方向归一化，是谱范数下的最速下降</li>
+<li>为什么不用精确 SVD：V 的列是 MᵀM 的特征向量，大矩阵上没有闭式解，只能迭代（Householder 反射压成两条对角线，再反复扫非对角元到零）；算术量相当于几次大矩阵乘法，但跑成几千步小而依赖的步骤，通常用 32 位浮点，GPU 矩阵单元大多空闲；Muon 每个训练步要对几百个矩阵做这个</li>
+<li>Newton-Schulz：X 乘 Xᵀ 再乘 X 得到 U S³ Vᵀ，旋转不变，每个强度被立方；任何奇多项式都一样，aX + b(XXᵀ)X + c(XXᵀ)²X = Up(S)Vᵀ，其中 p(s) = as + bs³ + cs⁵；整个问题缩成一维，找一个 p，作用几次后把 0 到 1 之间的每个 s 都送到 1 附近</li>
+<li>Muon 的系数 a=3.4445、b=-4.7750、c=2.0315：零点斜率 3.44，很小的值每步翻三倍多，0.001 五步后约 0.47；接近 1 的值留在一条带里，永远不恰好等于 1，但目标从来不是恰好 1，而是没有方向被淹没、也没有方向爆炸；教科书多项式 1.5s-0.5s³ 收敛到恰好 1，但零点斜率只有 1.5，同样 0.001 五步后只到约 0.008</li>
+<li>五步把 22 倍的 spread 压到 0.68 至 1.13 的带里；为什么是五步：3.44⁵ 约 480，足够把归一化后 0.001 的奇异值抬到约一半，每多一步要多三次矩阵乘法；torchtitan 里的生产核是同一循环的 bf16 版</li>
+<li>第三步代价与缩放：每次迭代三次矩阵乘法，短边 s、长边 l 时五次迭代共 5s²(2l+s)，一块 2048×7168 的投影约 3400 亿次乘加；值得付：相对前向与反向不到一个训练步 FLOPs 的 1%，Moonlight 的缩放实验发现 Muon 比 AdamW 省一倍算力；Kimi K2 一万亿参数用它训练，DeepSeek V4 Pro 大部分权重也用它</li>
+<li>缩放：正交更新每个元素都很小，Kimi 与 Moonlight 的配方把学习率乘以 0.2×√max(rows, cols)；对恰好正交的更新，这把 RMS 放到 0.2，落在 AdamW 的范围里，AdamW 的学习率与权重衰减可以直接沿用；五步 Newton-Schulz 只接近正交，实际落在 0.2 附近（64×256 的例子里是 0.18）</li>
+</ul>
+<h2>AdamW 对 Muon</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>AdamW</th>
+<th>Muon</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>工作单元</td>
+<td>一个数字</td>
+<td>整块矩阵</td>
+</tr>
+<tr>
+<td>状态缓冲</td>
+<td>2（m、v）</td>
+<td>1（动量）</td>
+</tr>
+<tr>
+<td>步代价</td>
+<td>便宜，内存受限</td>
+<td>矩阵乘法重</td>
+</tr>
+<tr>
+<td>训练</td>
+<td>嵌入、归一化、输出头</td>
+<td>隐藏层矩阵</td>
+</tr>
+<tr>
+<td>能在切片上跑吗</td>
+<td>能</td>
+<td>不能</td>
+</tr>
+</tbody>
+</table>
+<h2>为什么切片会算错</h2>
+<ul>
+<li>每次 Newton-Schulz 迭代都要乘 X Xᵀ，每行与每行配对，每个输出行都依赖每个输入行；只正交化自己的切片，得到的答案就不一样</li>
+<li>小实验：8×32 矩阵，整块正交化后看头 4 行，与只正交化头 4 行相比，误差 0.177，数值最大 0.498；同样测试换成逐元素（AdamW 式）更新，误差 0.0</li>
+</ul>
+<h2>显而易见的修法都有代价</h2>
+<ul>
+<li>All-gather 全部梯度，每块 GPU 都算一遍：每块 GPU 重复每块矩阵的数学运算，还要持有完整模型的临时量</li>
+<li>集中到一块 GPU：整个优化器步串行在一块设备上，其他设备空闲</li>
+<li>不再分片：放弃 FSDP 省内存的好处</li>
+<li>真正想要的更窄：给每个矩阵一个主人，主人分得均匀</li>
+</ul>
+<h2>FlexShard v1：存储布局与计算布局分开</h2>
+<ul>
+<li>torchtitan 里的第一个想法：把存储布局与计算布局分开；存储完全按 FSDP 与专家并行排布，检查点看到的仍是普通 DTensor；优化器步时每个参数声明一个计算布局</li>
+<li>Owned()：把整块矩阵送到 FlexShard 选定的一块 GPU 上；BlockShard(dim, block_size)：把整块行合在一起，因为 Kimi 式配方对每个注意力头单独跑 Muon；Shard(0)：在堆叠专家张量上，给每块 GPU 整块专家矩阵</li>
+<li>一桶四个矩阵：每块 GPU 在自己的存储四分之一上本地更新动量；一次 all-to-all 把第一块矩阵的每个四分之一飞到主人 GPU 0，第二块到 GPU 1，依此类推；每位主人手里现在是一块完整矩阵，跑 Newton-Schulz；第二次 all-to-all 把结果切回四份送回家</li>
+<li>主人与路由在优化器构建时规划一次，每步复用；主人按 Newton-Schulz 估算代价均衡，一桶在计算时，下一桶已在传输</li>
+<li>隐藏代价：返回的 all-to-all 要等桶里每块 GPU 都算完才能结束；每桶等最慢的主人，一步的代价是各桶最坏情况之和（README 的编造例子里 6+5+4=15 个单位，另加 6 次交换）</li>
+</ul>
+<h2>FlexShard v2：把矩阵直接存在主人那里</h2>
+<ul>
+<li>独立的 flex_shard 库再进一步：存权重时就定主人，不在步进时定；BucketedOwned 放置把每个矩阵整个存在主人那里</li>
+<li>再看一遍训练步：前向从主人那 gather 每个矩阵，与 FSDP gather 四分之一一样；反向的 reduce-scatter 本来就要做，现在它把整块梯度送到主人；然后优化器步：什么都不动，没有 all-to-all，也没有屏障</li>
+<li>每块 GPU 跑自己的矩阵，一步的代价是最慢 GPU 自己的总和（同一编造例子里是 8），而不是每桶最大值之和（15）</li>
+</ul>
+<h2>通信次数对比</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>前向</th>
+<th>反向</th>
+<th>优化器</th>
+<th>总计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FSDP + AdamW</td>
+<td>all-gather</td>
+<td>all-gather、reduce-scatter</td>
+<td>无</td>
+<td>3</td>
+</tr>
+<tr>
+<td>FlexShard v1 + Muon</td>
+<td>all-gather</td>
+<td>all-gather、reduce-scatter</td>
+<td>2 次 all-to-all</td>
+<td>5</td>
+</tr>
+<tr>
+<td>FlexShard v2 + Muon</td>
+<td>all-gather</td>
+<td>all-gather、reduce-scatter</td>
+<td>无</td>
+<td>3</td>
+</tr>
+</tbody>
+</table>
+<h2>实测结果</h2>
+<ul>
+<li>DeepSeek V3，6710 亿参数，256 张 H100，最慢 GPU 的优化器步从 527 毫秒降到 301 毫秒，短 43%，没有让任何一次矩阵乘法变快；数字来自 flex_shard README，不是作者的测量，计时的是 GPU 上的优化器步</li>
+<li>README 对规模很谨慎：整个训练步约 69 秒，作业之间波动比这还大，省的是优化器阶段，不是已证实的端到端加速；库的 DeepSeek V3 16B 例子里 Muon 步完全不启动 NCCL 核，小测试模型上的更新与全张量计算逐位相同</li>
+</ul>
+<h2>v1 对 v2</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>v1：torchtitan DistMuon</th>
+<th>v2：独立 flex_shard</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>主人</td>
+<td>构建时规划，优化器步时临时用</td>
+<td>永久，存储本身</td>
+</tr>
+<tr>
+<td>步之间</td>
+<td>FSDP 四分之一</td>
+<td>每块矩阵整个在主人那里</td>
+</tr>
+<tr>
+<td>优化器步</td>
+<td>每桶 2 次 all-to-all</td>
+<td>无集合通信</td>
+</tr>
+<tr>
+<td>优化器步内同步</td>
+<td>每桶最慢的主人</td>
+<td>无</td>
+</tr>
+<tr>
+<td>实测（DSv3 671B，256 H100）</td>
+<td>527 毫秒</td>
+<td>301 毫秒</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>v1 仍是正确的工具，当你想保持 FSDP2 的存储不动时；它还在改进：比引用的提交更新的上游提交里，交换走 bf16，字节数是 fp32 的一半，结果相同；配 CPU 卸载时 Newton-Schulz 在 GPU 上跑，一次测试里优化器步从约 15 秒降到 1 秒</li>
+</ul>
+<h2>一个运行时，多种放置</h2>
+<ul>
+<li>v2 还改变了 FlexShard 是什么：不再是优化器插件，而是 FSDP 分片运行时的替代品；模型切成桶，每卡一个桶一个缓冲，前向一次 all-gather、反向一次 reduce-scatter，用 FSDP 同一套钩子、流与预取；每个桶选的是放置：权重在两次使用之间怎么存</li>
+<li>Shard：存等分的行切片，与 FSDP2 逐字节相同；BucketedOwned：把整块矩阵存在主人那里，给 Muon 用；BlockShard：把整块合在一起，如一个注意力头的行；量化放置：保持完整量化 tile，可以 8 位 all-gather</li>
+<li>一次调用替代每个模块的 fully_shard 调用；检查点也变了：分布式检查点保存声明布局的本地分片，而不是 DTensor 状态字典</li>
+<li>所有放置背后是一条规则：把每块数学单元整个存在要用它的地方</li>
+</ul>
+<h2>同一条规则管低精度</h2>
+<ul>
+<li>块 FP8 给每块 128×128 tile 各一个缩放因子，FSDP 的等分行切片会把 tile 切成两半；FlexShard 的实验性 FP8 放置让每块 GPU 持有完整 tile、本地量化、all-gather FP8：约 bf16 一半字节，与先 gather 再量化逐位相同</li>
+<li>省的是参数 all-gather：载荷里每 tile 还带一个缩放因子，主权重与梯度 reduce-scatter 仍是稠密的；更新的上游工作加了 MXFP8 配方，用更小的 32×32 tile 排布，让一次 gather 的副本同时服务前向与反向的矩阵乘法</li>
+</ul>
+<h2>别人也走到了同一条规则</h2>
+<ul>
+<li>MatrixFSDP 在 ZeRO-3 之下把整块矩阵交给一个数据并行 rank，理由相同；veScale FSDP 点出同样的两个动机：矩阵优化器与块量化</li>
+<li>另一些绕开问题：NorMuon 每步把矩阵 gather 到指定设备再把更新 scatter 回去；Dion 改写更新，让任何设备都不需要整块矩阵</li>
+</ul>
+<h2>局限</h2>
+<ul>
+<li>整块矩阵分不均匀，每卡内存与工作量取决于主人分得多均衡；v2 按内存均衡主人，不按 Newton-Schulz 代价，仍有计算不均衡；301 毫秒已包含这部分</li>
+<li>库是实验性的，用了 PyTorch 私有 API；需要 PyTorch 2.16 的 CUDA 构建或较新的 nightly 构建；今天只面向 NVIDIA GPU：每桶要一维 CUDA 网格，没有 CPU 卸载，每个参数必须恰好匹配一个桶，每 rank 必须跑同一张图；规划思路本身（主人、路由、一次打包交换）与硬件无关</li>
+</ul>
+<h2>判断</h2>
+<ul>
+<li>切片上跑 AdamW 与整块上跑结果相同，是 FSDP 能成立的前提；Muon 把这个前提拿走了，FlexShard 没有硬扛，而是换了问题的提法：存储与计算分开，主人制让整块矩阵在需要它的地方算</li>
+<li>这条规则不只管 Muon：块 FP8 的整 tile 放置、MatrixFSDP 与 veScale 的同类选择，都是同一条规则的不同面；优化器越往矩阵整体走，分片运行时就越要按数学单元的边界切，而不是按行数的均分切</li>
+<li>与 11 月 13 日已发表的 torchtitan 1T MoE 篇主题重叠，但角度不同：那篇讲 1T MoE 训练的整体并行方案，这篇只讲 Muon 优化器与 FSDP 分片的冲突及 FlexShard 的两种解法</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
