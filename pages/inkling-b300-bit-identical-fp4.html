@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>在 B300 上优化 Inkling 2 Small 内核：1 行与 64 行逐比特相同 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>在 B300 上优化 Inkling 2 Small 内核：1 行与 64 行逐比特相同</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://www.rightnowai.co/blog/bit-identical-fp4-moe-kernels-on-blackwell">https://www.rightnowai.co/blog/bit-identical-fp4-moe-kernels-on-blackwell</a></div>
+<h1>在 B300 上优化 Inkling 2 Small 内核：1 行与 64 行逐比特相同（中文精读）</h1>
+<ul>
+<li>原文：<a href="https://www.rightnowai.co/blog/bit-identical-fp4-moe-kernels-on-blackwell">Optimizing Inkling 2 Small's kernels on NVIDIA B300</a>（RightNow AI，2026-11-22）</li>
+<li>收藏：2026-11-23，4⭐</li>
+<li>主题：Kernel 优化、MoE 架构、Blackwell、NVFP4、批量不变性</li>
+<li>一句话要点：Inkling 2 Small（594B MoE）在 8 块 B300 上，1 行每步与 64 行每步的 logits 逐比特相同；w13 专家 GEMM 重建后 NVFP4 快 5.1 倍、MXFP8 快 7.5 倍，比特不变。</li>
+</ul>
+<h2>为什么值得读</h2>
+<p>多数推理引擎只是接近精确：一个 token 的结果取决于同一步里还有什么，因为 batch 会改变求和的拆分方式，而浮点加法不满足结合律。这篇把 Thinking Machines 提出的批量不变性（batch invariance）做进了每一层——NVFP4 与 MXFP8 块缩放张量核、跨 8 块 GPU 的专家切分、每一次交换——并用 599 行真实模型的 logits 哈希逐行证明：1 行与 64 行逐比特相同。同时给出了一套可复用的验证方法：每条逐比特性质都配一个故意破坏的变体，测试必须抓住它。</p>
+<h2>核心结论</h2>
+<ul>
+<li><strong>逐比特相同，不是近似。</strong>完整模型在 8 块 B300 GPU 上，每个提示按每步 64 个位置与每步 1 个位置各喂一次，比较的 599 行 logits 全部相同（essay 143、code 152、math 157、explain 147 行）。与 vLLM 的下一 token 对数概率平均差 0.025 nats，中位数 0.0016，p95 0.1285，最大 0.7269；vLLM 自己跑两次为 0.0000，因此差距全是两个引擎算术之间的差异，不是噪声。</li>
+<li><strong>w13 专家 GEMM 重建后快 5.1 到 7.5 倍，比特不变。</strong>单块 GPU、单 token、9 次中位数：NVFP4 从 104.4 微秒降到 20.5 微秒（5.1 倍），MXFP8 从 184.3 微秒降到 24.6 微秒（7.5 倍）。与第一版内核相比，在 0 层与 40 层、1 到 64 行、3 次 CUDA 图重放下，每个中间结果逐比特相等，512 行 0 行不同。</li>
+<li><strong>单步约 16 毫秒，专家 GEMM 是最大头。</strong>无 profiler 时一步 16.35 毫秒（Nsight Systems 下 16.76 毫秒）：专家 GEMM 5.94 毫秒（35.4%）、交换与等待 4.93 毫秒、深度混合与卷积 2.45 毫秒、注意力 1.39 毫秒、路由与工作列表 0.88 毫秒、稠密 BF16 GEMM 0.63 毫秒、量化与合并 0.48 毫秒、嵌入与采样 0.03 毫秒。每步 8 个 token、每层 40 个不同专家时，重建的 w13 读到 NVFP4 1.39 TB/s、MXFP8 1.84 TB/s，实测 B300 内存带宽 6.85 TB/s，仍有余量。</li>
+<li><strong>下一目标是常驻解码程序。</strong>一次验证步的预算约每块 GPU 7.8 GB、154 次交换，按 Inkling 自身的推测 draft 每步 3.35 个 token、每层假定 45 个不同专家算（这两项还没实测），目标每用户约 1,900 token 每秒（区间 1,630–2,160）；vLLM 用同样的 draft 在同一台 8 块 B300 节点上是每用户 666 token 每秒。</li>
+</ul>
+<h2>批量不变性的三条做法</h2>
+<ol>
+<li><strong>每个归约都有固定形状。</strong>求和按固定分块与平衡树进行，跨 GPU 的求和按 rank 顺序以 FP32 折叠，构建时关闭自动收缩（<code>-fmad=false</code>、<code>-ffp-contract=off</code>），因此每个融合乘加都是有意写下的。专家 GEMM 里每个分块求和都以平衡树收尾，每次加法都是显式的就近舍入加法（<code>__fadd_rn</code>），编译器绝不会把每次加法融合成乘加。</li>
+<li><strong>每条性质都有一个破坏版孪生。</strong>每条逐比特性质都配一个故意破坏的变体，必须被测试抓住。破坏动不了比特时（比如重排求和本身就是精确的），日志会说明，而不是计入通过数。平衡树顶部的交换、最大值折叠里的 fma 行，都是这类孪生。</li>
+<li><strong>证明跑在真实模型上。</strong>不在小模型或模拟数据上验证，直接在完整模型、8 块 GPU 上喂真实提示，逐行比对哈希。</li>
+</ol>
+<h2>内核 1：NVFP4 专家跨 GPU 切分，逐比特精确</h2>
+<ul>
+<li>NVFP4 专家的激活在运行时量化，每 token 一个 FP32 缩放因子，由整行的最大值算出。SGLang 的配方称 NVFP4 专家无法做张量并行切分（激活缩放因子必须覆盖每个专家的完整输入宽度），因此各引擎用专家并行，整专家分给单块 GPU。</li>
+<li>这篇照样切分：每块 GPU 分到每个专家 1/8 的列，再交换行最大值。最大值与求取顺序无关，因此交换是精确的，量化器与参考实现的四比六规则逐比特一致。每块 GPU 取该行自己 288 列里的最大绝对值，再用 <code>fmaxf</code> 折叠收到的 8 个最大值，任何顺序都给出相同的比特。</li>
+<li>交换在测试过的全部 8 种 rank 顺序下都给出相同的比特（8 个 rank 在一块 B300 上模拟），顺序敏感的合并会被抓住。每块 GPU 读取每个活跃专家相等的切片，没有哪块 GPU 比别的 GPU 多读专家字节；代价是每层 FP4 多一次交换。</li>
+<li>第二种形式交换激活本身而非最大值，w2 按输出行切分而非按 K 切分。每块 GPU 随后独立量化整行，收尾的 FP32 部分和全归约变成 BF16 切片的全收集，每层 FP4 每块 GPU 少发 3.2 倍字节：1 行时 40 KB 对 129 KB，8 行验证步时 0.32 MB 对 1.03 MB。它在 SGLang 舍入的地方舍入，每个专家的输出在求和前舍入到 BF16，在测试的那层 FP4 上与这些舍入点的 FP64 模型相比误差为零。</li>
+</ul>
+<h2>内核 2：为单 token 重建的块缩放 GEMM</h2>
+<ul>
+<li>两个内核都跑 <code>tcgen05.mma</code>，权重作 M，每 tile 128 行，token 换到 N，FP32 累加器，块缩放因子放在张量内存里。NVFP4 用 4 比特 E2M1 数值，每 16 个值配一个 E4M3 缩放因子，Blackwell 张量核直接读取这些缩放因子：一条 <code>tcgen05.mma</code> 指令（<code>kind::mxf4nvf4.block_scale.block16</code>）就能用模型自己的字节做乘法。</li>
+<li>重建的内核里，一个线程给张量核喂数据：每个 K 步把权重与 token 的块缩放因子用 <code>tcgen05.cp</code> 拷进 TMEM，再发一条块缩放 <code>tcgen05.mma</code>，累加谓词在分块的第一个 K 步关闭，因此每个分块都从清零的 FP32 累加器开始。</li>
+<li>第一版内核给每个专家 tile 一个 CTA，沿 K 分阶段走且从不重叠：148 个 SM 上只有 40 个 CTA，114 GB/s，单 token 时每层 w13 GEMM 要流过 11.9 MB 的 FP4 权重与缩放因子。重建的内核把固定的 K 分块分给多个 CTA，每个阶段的加载都在 MMA 之下流水线化；每个分块仍是同一条块缩放 MMA 链，按相同的 K 顺序、从清零的累加器出发，最后到达的 CTA 按同一棵固定树合并分块。</li>
+<li>每个 CTA 写下自己分块的 FP32 部分和、做 fence、领一张票；最后到达的那个为下一次 CUDA 图重放把计数器清零，按分块顺序经 L2 读回每个分块，再按同一棵固定树求和。</li>
+<li>w2 的提速幅度小得多：第一形式 NVFP4 1.0 倍（14.3→14.3 微秒）、MXFP8 1.3 倍（20.5→16.3）；第二形式 NVFP4 3.3 倍（55.8→16.9）、MXFP8 4.6 倍（88.0→19.1）。</li>
+</ul>
+<h2>内核 3：一轮里的深度混合</h2>
+<ul>
+<li>Inkling 在每次注意力与每个专家块之前混合更早层的输出：对至多 9 个更早输出做 softmax，再做归一化。直接做的话，每次混合需要在 GPU 间做两次归约。</li>
+<li>更早输出的 Gram 矩阵在每块闭合时算一次并保留下来，混合的范数就来自这张矩阵加一列新数据：两次归约变一次，每层 2 轮而不是 4 轮。范数与直接算出的相对差在 1.6e-7 以内，用补偿求和，对抵消可能超门限的行回退到直接的第二轮。</li>
+<li>把专家路由器折进同一次归约，会改变 0 层与 40 层真实路由器上 1.1% 与 1.6% token 的 top 8 专家，因此不这么做：会动路由的改动不是无损的。</li>
+</ul>
+<h2>为什么需要 CUDA：NVFP4 在 Blackwell 上是原生精度</h2>
+<ul>
+<li>Thinking Machines 对这个模型做了 NVFP4 预训练、中间训练与后训练，模型卡称 NVFP4 是「模型的原生精度」。在 Blackwell 上模型跑的是训练时的数字本身。</li>
+<li>AMD 的 MI350X 与 MI355X 做不到：按 AMD 自己的说法，FP4 计算支持仅限 MXFP4，块宽 32、缩放因子为 2 的幂，因此 NVFP4 检查点必须先转成 MXFP4 才能走这条路。</li>
+</ul>
+<h2>局限</h2>
+<ul>
+<li>重建的 w13 内核在隔离测试里快 5 倍，但还没进引擎；单步里最大的一块仍是第一版内核的专家 GEMM。</li>
+<li>常驻解码程序的目标（每用户约 1,900 token 每秒）是预测，不是实测；预算里的 draft（每步 3.35 个 token）与每层 45 个不同专家都是假定值，没实测过。</li>
+<li>全部内核、测试与结果开源在 github.com/RightNow-AI/inkling-b300-kernels（Apache 2.0），构建目标为 B300 专属（<code>sm_103a</code>），结论不直接搬到其他架构。</li>
+</ul>
+<h2>可复用的点</h2>
+<ul>
+<li><strong>固定归约形状是批量不变性的地基</strong>：定长分块、平衡树、FP32 按 rank 顺序折叠、关闭自动收缩，四条缺一不可；每条性质配一个故意破坏的变体做反证，抓不住的破坏要在日志里说明。</li>
+<li><strong>最大值交换代替全量交换</strong>：需要跨 GPU 归约一个行级统计量时，先想它是否与顺序无关——最大值、全量交换里取最大，都是精确的；求和不是，顺序一变比特就变。</li>
+<li><strong>用检查点式验证代替只看平均误差</strong>：逐行比对 logits 哈希（599 行全同）比报一个平均 log-prob 差更能证明「相同」；与 vLLM 的平均差 0.025 nats 只能说明接近，不能说明相同。</li>
+<li><strong>先数轮数，再谈融合</strong>：深度混合从每层 4 轮降到 2 轮，靠的是把 Gram 矩阵算一次复用；但把路由器折进同一轮会动 top 8 专家——融合之前先量它动了什么。</li>
+</ul>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
