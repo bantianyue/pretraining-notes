@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Megatron Core MoE 可扩展训练 · 中文精读</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; color: #222; background: #fafafa; }
+  .nav { font-size: 13px; margin-bottom: 20px; }
+  .nav a { color: #1a56db; text-decoration: none; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .orig { font-size: 12px; color: #999; margin-bottom: 20px; }
+  .orig a { color: #1a56db; }
+  h2 { font-size: 18px; margin: 28px 0 10px; padding-bottom: 6px; border-bottom: 2px solid #222; }
+  h3 { font-size: 15px; margin: 20px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.75; color: #333; }
+  p { margin: 0 0 10px; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  code { background: #f4f4f5; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #f4f4f5; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0 16px; }
+  th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; line-height: 1.6; }
+  th { background: #f0f4ff; }
+  blockquote { border-left: 3px solid #1a56db; margin: 10px 0; padding: 6px 14px; color: #555; background: #f7f9ff; }
+  hr { border: none; border-top: 1px solid #e5e5e5; margin: 24px 0; }
+  .foot { margin-top: 30px; font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="index.html">← 返回预训练学习 · 资料库</a></div>
+<h1>Megatron Core MoE 可扩展训练</h1>
+<div class="orig">中文精读 ｜ 原文：<a href="https://arxiv.org/html/2603.07685v2">https://arxiv.org/html/2603.07685v2</a></div>
+<h1>《Megatron Core MoE 可扩展训练》· 中文精读</h1>
+<blockquote>
+<p>原文：https://arxiv.org/html/2603.07685v2（英文，NVIDIA 技术报告，2026-08-24）
+精读日期：2026-11-23 ｜ 主题：并行策略（训练）× 低精度量化 × MoE ｜ ⭐⭐⭐⭐⭐</p>
+</blockquote>
+<h2>一句话总览</h2>
+<p>MoE 的稀疏性把参数量与单 token 计算量解耦，带来两个结构性失配：参数-计算失配表现为内存、通信、计算效率三堵墙，稠密-稀疏失配表现为注意力层与 MoE 层对并行配置的冲突；Megatron-Core MoE 用 Parallel Folding 解耦两类层的并行映射，再以一整套内存、通信、计算与低精度优化把三堵墙逐个打穿，DeepSeek-V3-685B 在 256 张 GB300 上跑到单卡 1,233 TFLOPS。</p>
+<h2>要点速览</h2>
+<ul>
+<li><strong>两个失配是全篇的骨架</strong>：参数-计算失配（总参数随专家数 E 涨，单 token 计算只随 top-k 的 K 涨，DeepSeek-V3 是 685B 对 37B，18 倍）与稠密-稀疏失配（注意力层要高 TP/CP，MoE 层要高 EP，传统框架强迫两者共享一套配置）。</li>
+<li><strong>Parallel Folding 是核心解法</strong>：注意力层走 TP×CP×DP×PP，MoE 层走 ETP×EP×EDP×PP，两套映射独立，只要求 PP 一致；打破 EP≤DP 的限制，EP 可以折叠进 TP×CP×DP 子群，示例里 EP 从 8 提到 64，最低起步卡数从 64 张降到 8 张。</li>
+<li><strong>内存墙先算账再动手</strong>：DeepSeek-V3 单卡 199.5 GB（权重与梯度 36.4 GB、优化器状态 32.1 GB、激活 131 GB），远超 H100 的 80 GB；零开销的内存高效置换省 26.3 GB，FP8 激活省约 16 GB，细粒度重算省 42.4 GB，组合拳把单卡压到 80 GB 以下。</li>
+<li><strong>通信墙两招</strong>：HybridEP/DeepEP 这类 token 级分发把 all-to-all 延迟压下来（EP64 下 GB200 dispatch 675 微秒对 NCCL all-to-all 的 930 微秒，H100 上 4,626 对 9,164 微秒），再用 1F1B 前向-反向合并 + 权重梯度/数据梯度拆分把通信藏到计算后面，专家通信占比从 30–40% 降到 5% 以下。</li>
+<li><strong>计算效率墙五招</strong>：Grouped GEMM、核融合、FP8/FP4 加速、CUDA Graph、去同步执行（设备端读动态形状 + ECHO 动态克隆热门专家 + 分页暂存），解决小 GEMM 利用率低与 host 开销大两个根因。</li>
+<li><strong>低精度是横贯三堵墙的优化</strong>：三套 FP8 配方（逐张量、128×128 块缩放、MXFP8 的 1×32）加 NVFP4（FP32 张量级缩放 + E4M3 块级缩放、块长 16，配随机 Hadamard 变换、二维缩放、随机舍入）；选择性精度是底线：路由器留 FP32，嵌入、输出层、主梯度、主权重、优化器状态留高精度。</li>
+<li><strong>实测数字</strong>：DeepSeek-V3 GB300 1,233、GB200 1,048、H100（1,024 卡）368 TFLOPS/卡；Qwen3-235B GB300 974、GB200 919、H100 320 TFLOPS/卡；131K 长上下文 Qwen3-235B 在 GB300 上仍有 1,150 TFLOPS/卡。</li>
+</ul>
+<h2>两个失配：MoE 为什么难训</h2>
+<p>稠密 Transformer 里参数量与单 token 计算量是锁死的：N 个参数约等于每 token 6N FLOPs（前向加反向），卡数涨、计算量跟着涨，通信占比相对稳定。MoE 把这条锁链切断了：每 token 只激活 K 个专家，计算量约 6N_激活，参数量却是 N_总。DeepSeek-V3 总参数 685B、每 token 只激活 37B，差 18 倍。卡数为了装参数不得不涨，计算量却不涨，通信开销就盖不住了。这是参数-计算失配，质的不同，不是程度问题。</p>
+<p>由此生出三堵墙。内存墙：全部 E 个专家的参数、梯度、优化器状态都要常驻显存，哪怕每 token 只用 K 个；动态路由还会在某些专家上堆出不可预测的显存尖峰。通信墙：专家并行（EP）要 all-to-all 分发 token 再收回结果，每层两次，DeepSeek-V3 共 58 个 MoE 层，前向就是 116 次 dispatch/combine，反向再翻倍；EP 一跨节点，带宽掉一个量级，未优化时 all-to-all 能占训练时间的 60%。计算效率墙：细粒度专家产出大量小 GEMM（DeepSeek-V3 每个专家每步约 128 个 token 的 M 维），Tensor Core 吃不饱；路由与置换又带来一堆小核，host 端 launch 开销让 GPU 空转。</p>
+<p>第二个失配在并行配置层面。同一 Transformer 块里注意力层与 MoE 层要的东西直接冲突：注意力层的大 QKV 矩阵喜欢高 TP、长序列喜欢高 CP；MoE 层的小专家被高 TP 切碎后效率崩掉，CP 对它又毫无意义，EP 则是必需。传统框架把 EP 当成 DP 的子维度（EP⊆DP），世界大小 = TP×CP×PP×DP，一套配置管两类层。后果有三：EP=8 就强制 DP≥8，叠加 CP=8 后最低 64 卡起步；高 TP 与低 TP 两害相权；EP 的 all-to-all 常被逼出节点，撞上 5–10 倍的带宽落差。</p>
+<h2>MoE 层架构：路由、分发、计算、合并</h2>
+<p>MoE 层由三个模块化组件组成：路由器、token 分发器、专家。前向分四步：路由、分发、专家计算、合并。路由器是可学习线性投影加 score 函数（softmax 或 DeepSeek-V3 用的 sigmoid）再 top-k，输出路由权重 probs 与布尔掩码 routing_map；专家数多时路由器可跑 FP32 保数值稳定。分发器先置换 token，让去同一个专家的 token 连续存放，再经 AllGather、all-to-all 或 Flex（DeepEP/HybridEP）后端跨卡搬运；分发与合并各分三个阶段（预处理、分发、后处理；合并是反向流程）。专家计算把本卡全部专家并进一次 Grouped GEMM（TEGroupedMLP，支持 FP8/FP4），共享专家可与路由专家并行计算、输出在合并阶段相加。</p>
+<p>三个组件解耦的好处是能各自优化：路由器可以融进 CUDA Graph 而不碰分发逻辑，分发器可以在 all-to-all 与 DeepEP 之间换后端而不改专家计算，专家实现可以换 GEMM 后端。</p>
+<p>并行进程组也按组件分开管理：注意力层用 tp、cp、dp、pp，专家层用 ep、expt_tp、expt_dp、pp；路由器权重在 EP rank 间复制，专家梯度在 EDP 组内归约。优化器用 ChainedOptimizer 包两套优化器：专家参数标 allreduce=False，稠密层梯度在 dp_cp_group 归约、专家在 expt_dp_group 归约，专家梯度再按 edp_size/dp_size 缩放，补两者有效 batch 的差异。ZeRO 式优化器状态分片照常工作：专家参数的状态在 EP 组内分片，稠密参数的状态按 DP 分片。</p>
+<h2>Parallel Folding：两类层各用各的并行</h2>
+<p>Parallel Folding 的想法一句话：不强迫注意力层与 MoE 层共享并行配置。注意力层在 TP×CP×DP×PP 上成组，MoE 层在 ETP×EP×EDP×PP 上成组，唯一约束是 PP 必须一致以保证梯度流正确。ETP（专家张量并行）通常取 1，专家保持完整宽度，GEMM 效率最高；EDP（专家数据并行）复制专家换吞吐。</p>
+<p>收益有四条。第一，打破 EP≤DP：注意力 TP=4、CP=2、DP=8、PP=4（共 256 卡）时，传统做法 EP 最多 8，Folding 后 MoE 用 ETP=1、EP=64、EDP=1，EP 折叠进 TP×CP×DP 子群，专家并行度翻 8 倍。第二，最低卡数：CP=8 加 EP=8 传统要 64 卡起步，Folding 后 CP 与 EP 共享同一组卡，只要 8 卡。第三，各自最优：注意力高 TP、MoE 的 ETP=1。第四，通信留在 NVLink 域：CP 与 EP 的 all-to-all 都能不出节点。</p>
+<p>Megatron-FSDP 与 EP 的组合进一步压显存：双 DeviceMesh 架构，主网格管稠密模块的 DP 分片、TP、CP，专家网格管 EP 模块、FSDP 只在 EDP 维度内分片；AllGather 与 ReduceScatter 被限制在小的 EDP 组内。外层再加 HSDP（混合分片数据并行），把 AllGather 限定在组内规模。零拷贝通信靠两招：每模块展平后非均匀分片（分片边界对齐通信缓冲布局，Llama3-405B 上通信开销降约 10%），加持久双缓冲与 NCCL 用户缓冲区注册（UBR），通信核的 SM 占用从 8–32 降到 1–4，SHARP 交换机上卸载后甚至不占 SM。</p>
+<h2>内存墙：先算账，再按开销排序动手</h2>
+<p>DeepSeek-V3 在 PP4×VPP4×EP64、256 卡配置下的单卡内存账：权重与梯度 36.4 GB、主权重与优化器状态 32.1 GB、激活 131 GB，合计 199.5 GB。激活是大头，超过权重与优化器之和。优化按开销从低到高排：零开销、精度换、算力换、带宽换、跨设备分。</p>
+<p>零开销的是内存高效置换（Memory-Efficient Permutation）：标准写法是专家算完再乘路由权重 pᵢ，置换后把 pᵢ 提前乘到激活上再进第二个线性层。专家无偏置时 W₂ 是纯线性映射，标量乘法可交换，两式数学等价。收益在于反向：标准写法算 ∂L/∂pᵢ 要保留每个专家输出，置换后只依赖 φ(zᵢ)，而 zᵢ 本来就要为 SwiGLU 反向保存，融合反向核现场重算即可，不引入新缓冲。DeepSeek-V3 上省 26.3 GB/卡，零计算开销。</p>
+<p>精度换是 FP8/FP4 存激活：线性层输入占激活大头，FP8 存省一半、FP4 省四分之三；DeepSeek-V3 上 FP8 约省 16 GB。算力换是细粒度重算：不整层 checkpoint，只重算最占显存又最便宜的算子（MLA 上投影 30.4 GB、SwiGLU 激活函数 3.8 GB、LayerNorm 8.2 GB，合计 42.4 GB），额外计算不到 5%；输出丢弃重算在模块输出被下游消费后立即释放，反向再从重算结果恢复。带宽换是细粒度 offload：模块级粒度（LayerNorm 这类轻量模块用重算，注意力与专家这类昂贵模块用 offload），D2H/H2D 专用流与计算重叠，层间交错预取（Layer-Staggered Reload）保证任意时刻每种模块只有一个激活在卡上；峰值显存从 L×层输入 + 1×层中间量降到 1×层输入 + 1×层中间量，与层数无关。实测 offload 降 10–18% 显存、只掉 1.6–2% 吞吐；Qwen3-235B 上 offload 让 TP 从 2 降到 1、EP 从 16 升到 64，吞吐反涨 15%。</p>
+<p>权重与优化器侧：精度感知优化器把 Adam 一阶、二阶矩存成 BF16（甚至 FP8），更新时在融合 Adam 核内动态转回 FP32 计算，优化器状态省约 50%（32.1 GB 账里省 10–12 GB）；优化器状态 offload 在 step 后把状态与主权重搬去 CPU、前向反向期间腾出显存，DeepSeek-V3 上省 15–20 GB，每步只多 0.1–0.2 秒。两招可叠加：先 BF16 存、再 offload，搬运量也跟着小。</p>
+<h2>通信墙：先把带宽打满，再把延迟藏起来</h2>
+<p>EP 的 all-to-all 有三难：高频（58 层 × 每层两次）、跨节点带宽瓶颈、低算术强度（小专家算得快，没多少计算可供重叠）。解法分两层：带宽与延迟隐藏。</p>
+<p>带宽层是 DeepEP 与 HybridEP 两个 token 级分发后端：省掉置换阶段（传统 all-to-all 要先把每个 token 复制 top-k 份），直接按路由信息读全局内存、经 FIFO 队列写目标；跨节点时先用 RDMA warp 组在同本地序号的 GPU 间换数据、再在节点内转发，跨节点流量与节点内传输重叠；合并阶段把归约融进通信核，先跨节点归约、再节点内归约。EP64 下 dispatch 延迟：GB200 上 HybridEP 675 微秒对 all-to-all 930 微秒，H100 上 4,626 对 9,164 微秒。</p>
+<p>延迟隐藏层是 1F1B 的 all-to-all 重叠：把相邻 micro-batch 的前向与反向合并、跨 CUDA 流交错，让一个 micro-batch 的反向 all-to-all 藏到另一个的前向注意力/MLP 后面。FWD-FWD 合并要 2 倍激活峰值，FWD-BWD 合并（DualPipe 等价）无额外显存，是首选；代价是首个前向与末个反向的 all-to-all 藏不住。权重梯度/数据梯度拆分（W/D split）再解一个依赖：反向分发依赖反向 MLP 的数据梯度，把 MLP 反向拆成权重梯度（与分发无关）与数据梯度两段，权重梯度计算可以去填分发的空档。合起来，DeepSeek-V3 在 H100 上的专家通信占比从 30–40% 降到 5% 以下，all-to-all 重叠率 93%。交错流水线（VPP）把重叠机会扩到流水线 rank 之间，暖机末尾多跑一个 micro-batch 保证相邻 FWD/BWD 对无依赖。</p>
+<h2>计算效率墙：小核合并，host 开销清零</h2>
+<p>计算低效有两个根因：核效率（小 GEMM 吃不饱 Tensor Core）与 host 开销（核太多、launch 跟不上、dropless 路由的动态形状还要 host-device 同步拿形状）。</p>
+<p>核效率侧：Grouped GEMM 把各专家算子并成一批（多流 cuBLASLt、单核 CUTLASS、支持 CUDA Graph 的 cuBLASLt 分组模式、Blackwell 上融合激活与量化的 cuteDSL）；置换融合把预处理（算行偏移映射）、置换、反置换三段并成流水线，反置换在 FP32 下求和；路由器与辅助损失融合把 score 计算（top-k、softmax/sigmoid）、辅助损失输入生成、辅助损失计算各并成一个核。</p>
+<p>Host 开销侧：CUDA Graph 把整段核序列捕获后重放，省掉每步的 Python 与 launch 开销；dropless 路由的动态形状是拦路虎，解法是去同步执行——设备端核直接从 GPU 内存读形状（device-initiated kernels），ECHO 动态克隆热门专家到空闲 rank 平衡负载、缩小最坏与实际缓冲需求的差距，分页暂存（Paged Stashing）把每层最坏尺寸的临时缓冲全层共享、只把实际 token 数存进 64 token 一页的暂存缓冲，内存从 O(层数×最坏值）降到 O(最坏值+实际总量），前后向都用专用流与计算重叠。三招合起来，dropless MoE 也能全程跑在 CUDA Graph 里。</p>
+<h2>FP8/FP4：三套 FP8 配方加 NVFP4</h2>
+<p>低精度同时打三堵墙：激活省 50%（FP8）/75%（FP4）、参数 AllGather 流量减半、Tensor Core GEMM 更快；代价是收敛风险与量化核的 host 开销。底线是选择性精度：路由器留 FP32，嵌入、输出层、主梯度、主权重、优化器状态留高精度，专家 GEMM 这种大头计算才上低精度。</p>
+<p>三套 FP8 配方按硬件演进：逐张量缩放（单缩放因子，延迟缩放不推荐、实时缩放更准，Hopper 上只支持 TN 布局 FP8 GEMM、要存转置版激活，Blackwell 上全布局支持）；块缩放 FP8（激活与梯度 1×128、权重 128×128，DeepSeek-V3、Minimax-M2、Ant Ling-2.0 在产线验证过，Hopper 首选）；MXFP8（1×32 粒度、E8M0 缩放因子、Blackwell 原生五代 Tensor Core 支持，Blackwell 默认）。NVFP4 是两级微缩放：FP32 张量级缩放先把分布挪进块缩放兼容范围，E4M3 块级缩放再把每 16 个元素一块映射进 FP4；稳定训练另加三招：随机 Hadamard 变换（打散权重梯度异常值）、16×16 二维缩放（前后向量化方向一致）、随机舍入（消确定性舍入偏差）。</p>
+<p>原生 FP8/FP4 主权重消掉中间层：传统做法是 FP32 主权重、BF16 模型权重、FP8/FP4 计算权重三份拷贝，直接从 FP32 分片量化到 FP8/FP4、参数 AllGather 也走低精度，省掉 BF16 拷贝、通信减半；MXFP8 例外，正反向量化方向不同、要行列两份量化版，通信仍走 BF16。MoE 专属的两处融合：路由映射填充（只填充路由映射、不填充 token，避免逐张量填充开销）与分组量化（多张量一次量化成一个核，降 CPU 开销、可进 CUDA Graph）；NVFP4 量化核把 RHT、二维缩放、随机舍入全融进去。</p>
+<h2>长上下文、生产特性与强化学习</h2>
+<p>长上下文（§6）改变优化天平：16K–64K+ 时注意力计算占主导，CP 与 TP 的取舍重排；打包序列（packed sequences）处理变长训练，动态 CP 按实际长度切分。</p>
+<p>生产特性（§7）包括：负载均衡与 token 丢弃（带容量控制）、共享专家、LatentMoE、分布式检查点（并行无关的重分片）、灵活非对称虚拟流水线（自定义每阶段层排布）、从稠密检查点上循环（upcycling）、多 token 预测（MTP）、Muon 优化器。</p>
+<p>强化学习（§10）是新增的重点：RL 后训练的变长序列、内存 offload、在线权重导出是三大挑战；Megatron-Bridge 接主流 RL 框架，打包序列支持、动态 CP、路由器重放（router replay）是 RL 专属优化。</p>
+<h2>实测与调优方法论</h2>
+<p>评测用 DeepSeek-V3-685B 与 Qwen3-235B，GB300/GB200/H100 三档硬件，全开优化栈。单卡 TFLOPS：DeepSeek-V3 在 GB300 1,233、GB200 1,048、H100（1,024 卡）368；Qwen3-235B 在 GB300 974、GB200 919、H100 320；131K 长上下文的 Qwen3-235B 在 GB300 上仍有 1,150。GB200/GB300 的 token 吞吐约为 H100 的 3 倍，来自显存带宽、算力与 MXFP8 原生支持。</p>
+<p>调优方法论是三段工作流。第一段：先保证显存可行，按并行策略对峰值激活、权重显存、优化器状态、每层通信的影响排布，目标是模型并行度尽量小、数据并行尽量大（分布式优化器分片优化器状态、腾出显存给 DP）。第二段：选通信开销最小的并行策略，EP×TP 尽量留在 NVLink 域内（通常 8 卡一节点），超域时优先用 PP 而不是把 TP/EP 扩出节点；专家层优先 EP 而不是 TP（Mixtral-8×7B 上 EP8×TP1 胜过 EP4×TP2）；序列 ≥8K 才开 CP，&lt;4K 时 CP 开销大于收益。第三段：按瓶颈画像对症下药，内存瓶颈上 FP8、选择性重算、精度感知优化器、offload；通信瓶颈看是哪类集合通信再定；计算瓶颈看核效率还是 host 开销。</p>
+<p>结论把三堵墙的账一次算清：内存从单卡 199.5 GB 压到 80 GB 以下，all-to-all 从占训练时间 60% 降到 10% 以下，计算低效从主导瓶颈降为可控约束。两处失配的解法是全文的纲：Parallel Folding 解稠密-稀疏失配，三堵墙的优化解参数-计算失配，低精度横贯三者。</p>
+<h2>启示与关联</h2>
+<p>这篇报告是 Megatron-Core MoE 的总纲，适合当作 MoE 训练系统的地图：先按 §1 的两个失配与三堵墙建立问题框架，再按 §3 的 Parallel Folding 定并行策略，按 §4 的三堵墙清单逐项选优化，按 §5 的配方表选低精度路线，最后按 §9 的三段工作流落地调优。与知识库已有的条目互补：Megatron-FSDP 精读讲的是 FSDP 本体与双 DeviceMesh 的实现细节，这篇讲的是 FSDP 在 MoE 栈里的位置；ZeRO 精读讲的是显存分片的源头，这篇的内存墙一节是 ZeRO 思想在 MoE 上的展开；并行策略（训练）主题下的 PP 之害与极简方案两篇讲的是“不要 PP、FSDP×CP×EP 三件套”的激进路线，这篇则给出 NVIDIA 官方的完整答案：PP 仍在，但只要求两类层 PP 一致，其余维度各自最优。</p>
+<blockquote>
+<p>收藏：2026-11-23 ｜ 原文链接：https://arxiv.org/html/2603.07685v2 ｜ 一句话要点：MoE 稀疏性造出参数-计算失配（三堵墙）与稠密-稀疏失配（并行配置冲突），Parallel Folding 解耦注意力与 MoE 层的并行映射，内存/通信/计算/低精度四套优化把 DeepSeek-V3 推到 GB300 单卡 1,233 TFLOPS。</p>
+</blockquote>
+<div class="foot">预训练学习 · 资料库 — 中文精读系列</div>
+</body>
+</html>
