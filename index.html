@@ -1108,6 +1108,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span class="tag">vLLM</span><span class="tag">NVMe</span><span>收藏于 2026-11-23</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">101</span>在 B300 上优化 Inkling 2 Small 内核：1 行与 64 行逐比特相同</h3>
+  <p>Inkling 2 Small（594B MoE）在 8 块 B300 GPU 上，1 行每步与 64 行每步的 logits 逐比特相同，599 行 0 行不同；与 vLLM 的下一 token 对数概率平均差 0.025 nats，p95 为 0.13。w13 专家 GEMM 重建后 NVFP4 快 5.1 倍、MXFP8 快 7.5 倍，比特不变。做法是把批量不变性做进每一层：归约形状固定、NVFP4 专家按列切分后交换行最大值、单线程喂张量核的块缩放 GEMM 从清零累加器出发；每条性质配一个故意破坏的变体做反证。</p>
+  <div class="links">
+    <a class="cn" href="pages/inkling-b300-bit-identical-fp4.html">中文精读 →</a>
+    <a class="en" href="https://www.rightnowai.co/blog/bit-identical-fp4-moe-kernels-on-blackwell">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">MoE 架构</span><span class="tag">Blackwell</span><span class="tag">NVFP4</span><span>收藏于 2026-11-23</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
