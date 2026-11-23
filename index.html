@@ -1121,6 +1121,16 @@
   <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">Kernel 优化</span><span class="tag">MoE 架构</span><span class="tag">Blackwell</span><span class="tag">NVFP4</span><span>收藏于 2026-11-23</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">102</span>GLM-5.4：28层循环跑两遍，750B模型追平2T-3T参数模型</h3>
+  <p>GLM-5.4 把 750B 基座的 28 层循环跑两遍，不增加参数，智能水平达到与 2T-3T 参数模型相当。三处改动控制了多一轮循环的代价：门控渐进更新稳住激活尺度（x₁ = x₀ + β₁(h₁ - x₀)），混合 KV 缓存让多一轮循环只多一个滑窗（每层 KV latent 加 top-k，k 取 2048；第二遍滑窗 128 个 token），第二轮直接复用第一轮的稀疏注意力索引，零额外开销。30B 等参数对照：参数量相同、算力只多约 10%，AIME25 从 19.17 升到 30.42，GPQA-Diamond 从 47.58 升到 56.26，多数基准平均输出长度少 10%–14%。推理峰值 70–80 token/秒，闲时 200 token/秒。</p>
+  <div class="links">
+    <a class="cn" href="pages/glm-54-loop-transformer.html">中文精读 →</a>
+    <a class="en" href="https://z.ai/blog/glm-5.4">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag">⭐⭐⭐⭐</span><span class="tag">循环架构</span><span class="tag">训练核心流程</span><span class="tag">KV 缓存</span><span class="tag">推理优化</span><span>收藏于 2026-11-24</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐</span> 工具手册</h2>
 
 <div class="card">
