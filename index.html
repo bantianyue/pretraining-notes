@@ -246,6 +246,16 @@
   <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（推理）</span><span class="tag">推理优化</span><span class="tag">KV Cache</span><span>收藏于 2026-11-13</span></div>
 </div>
 
+<div class="card">
+  <h3><span class="n">99</span>Megatron Core MoE 可扩展训练：两个失配、三堵墙与 Parallel Folding</h3>
+  <p>MoE 的稀疏性造出两个结构性失配：参数-计算失配（DeepSeek-V3 总参数 685B、对激活 37B，18 倍）生出内存、通信、计算效率三堵墙，稠密-稀疏失配让注意力层与 MoE 层对并行配置的要求直接冲突。Parallel Folding 把两类层的并行映射解耦（注意力 TP×CP×DP×PP，MoE 用 ETP×EP×EDP×PP），打破 EP≤DP 的限制，EP 从 8 提到 64；内存高效置换零开销省 26.3 GB/卡、细粒度重算省 42.4 GB，单卡从 199.5 GB 压到 80 GB 以下；HybridEP 加 1F1B 前向-反向重叠把专家通信占比从 30–40% 降到 5% 以下；FP8 三配方加 NVFP4 横贯三堵墙；DeepSeek-V3 在 GB300 上单卡 1,233 TFLOPS。</p>
+  <div class="links">
+    <a class="cn" href="pages/megatron-core-moe-scalable-training.html">中文精读 →</a>
+    <a class="en" href="https://arxiv.org/html/2603.07685v2">英文原文</a>
+  </div>
+  <div class="meta"><span class="tag star5">⭐⭐⭐⭐⭐</span><span class="tag">并行策略（训练）</span><span class="tag">低精度量化</span><span class="tag">MoE</span><span>收藏于 2026-11-23</span></div>
+</div>
+
 <h2><span class="stars">⭐⭐⭐⭐</span> 重点阅读</h2>
 
 <div class="card">
